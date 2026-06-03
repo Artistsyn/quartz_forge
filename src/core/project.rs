@@ -2,7 +2,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::core::quartz_domain::{
-    LogicTree, QuartzEventBinding, QuartzObjectBlueprint, QuartzTargetRef, SceneCanvasSpec,
+    CustomCodeBlock, CustomCodeKind, LogicTree, QuartzEventBinding, QuartzObjectBlueprint,
+    QuartzTargetRef, SceneCanvasSpec, SceneViewBookmark,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct ProjectManifest {
     pub next_logic_tree_id: u32,
     #[serde(default = "default_next_event_id")]
     pub next_event_id: u32,
+    #[serde(default = "default_next_custom_code_id")]
+    pub next_custom_code_id: u32,
     pub active_scene_id: Option<String>,
     pub scenes: Vec<SceneDocument>,
     pub scripts: Vec<ScriptDocument>,
@@ -37,6 +40,7 @@ impl ProjectManifest {
             next_object_id: 1,
             next_logic_tree_id: 1,
             next_event_id: 1,
+            next_custom_code_id: 1,
             active_scene_id: None,
             scenes: Vec::new(),
             scripts: Vec::new(),
@@ -58,7 +62,7 @@ impl ProjectManifest {
     pub fn make_scene(&mut self, name: String, kind: SceneKind) -> SceneDocument {
         let id = format!("scene_{:04}", self.next_scene_id);
         self.next_scene_id += 1;
-        let source_file = format!("scripts/{}_scene.rs", name.replace(' ', "_").to_lowercase());
+        let source_file = format!("src/scripts/{}_scene.rs", name.replace(' ', "_").to_lowercase());
         SceneDocument {
             id,
             name,
@@ -69,6 +73,8 @@ impl ProjectManifest {
             objects: Vec::new(),
             logic_trees: Vec::new(),
             events: Vec::new(),
+            custom_code_blocks: default_custom_code_blocks(),
+            view_bookmarks: default_scene_view_bookmarks(),
         }
     }
 
@@ -91,6 +97,13 @@ impl ProjectManifest {
         let id = format!("event_{:04}", self.next_event_id);
         self.next_event_id += 1;
         let name = format!("event_binding_{}", self.next_event_id - 1);
+        (id, name)
+    }
+
+    pub fn next_custom_code_identity(&mut self, kind: CustomCodeKind) -> (String, String) {
+        let id = format!("code_{:04}", self.next_custom_code_id);
+        self.next_custom_code_id += 1;
+        let name = format!("{}_{}", kind.as_str().to_lowercase(), self.next_custom_code_id - 1);
         (id, name)
     }
 
@@ -119,6 +132,10 @@ pub struct SceneDocument {
     pub logic_trees: Vec<LogicTree>,
     #[serde(default)]
     pub events: Vec<QuartzEventBinding>,
+    #[serde(default)]
+    pub custom_code_blocks: Vec<CustomCodeBlock>,
+    #[serde(default)]
+    pub view_bookmarks: Vec<SceneViewBookmark>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,10 +229,41 @@ impl EditorProjectState {
         }
     }
 
+    pub fn add_background_object_to_active_scene(&mut self, cell_w: f32, cell_h: f32) {
+        let scene_name = self
+            .manifest
+            .scenes
+            .get(self.active_scene_index)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "scene".to_owned());
+        let scene_source_file = self
+            .manifest
+            .scenes
+            .get(self.active_scene_index)
+            .map(|s| s.source_file.clone())
+            .unwrap_or_default();
+        let (id, name) = self.manifest.next_object_identity(&scene_name);
+        if let Some(scene) = self.manifest.scenes.get_mut(self.active_scene_index) {
+            let mut obj = QuartzObjectBlueprint::new(id, format!("{}_bg", name));
+            obj.output_file = scene_source_file;
+            obj.apply_background_defaults(cell_w, cell_h);
+            scene.objects.push(obj);
+            self.dirty = true;
+        }
+    }
+
     pub fn add_logic_tree_to_active_scene(&mut self) {
+        let scene_source_file = self
+            .manifest
+            .scenes
+            .get(self.active_scene_index)
+            .map(|s| s.source_file.clone())
+            .unwrap_or_default();
         let (id, name) = self.manifest.next_logic_tree_identity();
         if let Some(scene) = self.manifest.scenes.get_mut(self.active_scene_index) {
-            scene.logic_trees.push(LogicTree::new(id, name));
+            let mut tree = LogicTree::new(id, name);
+            tree.output_file = scene_source_file;
+            scene.logic_trees.push(tree);
             self.dirty = true;
         }
     }
@@ -243,6 +291,45 @@ impl EditorProjectState {
             self.dirty = true;
         }
     }
+
+    pub fn add_custom_code_block_to_active_scene(&mut self, kind: CustomCodeKind) {
+        let scene_source_file = self
+            .manifest
+            .scenes
+            .get(self.active_scene_index)
+            .map(|s| s.source_file.clone())
+            .unwrap_or_default();
+        let (id, name) = self.manifest.next_custom_code_identity(kind);
+        let default_target = default_custom_code_target(&scene_source_file, kind);
+        if let Some(scene) = self.manifest.scenes.get_mut(self.active_scene_index) {
+            let mut block = CustomCodeBlock::new(id, name, kind, default_target);
+            if matches!(kind, CustomCodeKind::CustomEvents) {
+                block.custom_event_name = "custom_event".to_owned();
+            }
+            scene.custom_code_blocks.push(block);
+            self.dirty = true;
+        }
+    }
+
+    pub fn add_view_bookmark_to_active_scene(
+        &mut self,
+        name: String,
+        pan_x: f32,
+        pan_y: f32,
+        zoom: f32,
+    ) {
+        let id = format!("bookmark_{}", Utc::now().timestamp_millis());
+        if let Some(scene) = self.manifest.scenes.get_mut(self.active_scene_index) {
+            scene.view_bookmarks.push(SceneViewBookmark {
+                id,
+                name,
+                pan_x,
+                pan_y,
+                zoom,
+            });
+            self.dirty = true;
+        }
+    }
 }
 
 fn default_next_object_id() -> u32 {
@@ -255,4 +342,40 @@ fn default_next_logic_tree_id() -> u32 {
 
 fn default_next_event_id() -> u32 {
     1
+}
+
+fn default_next_custom_code_id() -> u32 {
+    1
+}
+
+fn default_custom_code_target(scene_source_file: &str, kind: CustomCodeKind) -> String {
+    match kind {
+        CustomCodeKind::Constants => "src/constants.rs".to_owned(),
+        CustomCodeKind::GameStateVars | CustomCodeKind::TypedVars => "src/game_state.rs".to_owned(),
+        CustomCodeKind::CustomEvents
+        | CustomCodeKind::UpdateLoops
+        | CustomCodeKind::TopLevel
+        | CustomCodeKind::ManualFileOverride => scene_source_file.to_owned(),
+    }
+}
+
+fn default_custom_code_blocks() -> Vec<CustomCodeBlock> {
+    vec![
+        CustomCodeBlock::new(
+            "code_defaults_constants".to_owned(),
+            "constants".to_owned(),
+            CustomCodeKind::Constants,
+            "src/constants.rs".to_owned(),
+        ),
+        CustomCodeBlock::new(
+            "code_defaults_game_state".to_owned(),
+            "game_state".to_owned(),
+            CustomCodeKind::GameStateVars,
+            "src/game_state.rs".to_owned(),
+        ),
+    ]
+}
+
+fn default_scene_view_bookmarks() -> Vec<SceneViewBookmark> {
+    vec![SceneViewBookmark::home_background_cell()]
 }

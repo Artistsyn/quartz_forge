@@ -9,6 +9,7 @@ use crate::core::quartz_domain::{
 impl QuartzForgeApp {
     pub(super) fn logic_editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("Update Scripts (on_update)");
+        let project_root = self.project_root.clone();
         let logic_rows: Vec<String> = self
             .project_state
             .manifest
@@ -18,7 +19,14 @@ impl QuartzForgeApp {
                 s.logic_trees
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| format!("[{}] {}", i + 1, t.name))
+                    .map(|(i, t)| {
+                        let file_label = if t.output_file.trim().is_empty() {
+                            "<scene file>".to_owned()
+                        } else {
+                            t.output_file.clone()
+                        };
+                        format!("[{}] {} ({})", i + 1, t.name, file_label)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -84,6 +92,16 @@ impl QuartzForgeApp {
             if ui.text_edit_singleline(&mut tree.name).changed() {
                 tree_changed = true;
             }
+
+            ui.separator();
+            ui.label("Update Script File Target");
+            tree_changed |= Self::source_file_picker(
+                ui,
+                "Logic File Target",
+                project_root.as_deref(),
+                &mut self.status_line,
+                &mut tree.output_file,
+            );
 
             if ui.button("+ Add Teleport Action").clicked() {
                 tree.nodes.push(LogicNode::Action(QuartzAction::Teleport {

@@ -1,5 +1,38 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CanvasOrientation {
+    Landscape,
+    Portrait,
+}
+
+impl Default for CanvasOrientation {
+    fn default() -> Self {
+        Self::Landscape
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneViewBookmark {
+    pub id: String,
+    pub name: String,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub zoom: f32,
+}
+
+impl SceneViewBookmark {
+    pub fn home_background_cell() -> Self {
+        Self {
+            id: "bookmark_home".to_owned(),
+            name: "Home Background Cell".to_owned(),
+            pan_x: 0.0,
+            pan_y: 0.0,
+            zoom: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneCanvasSpec {
     pub virtual_width: f32,
@@ -21,6 +54,14 @@ pub struct SceneCanvasSpec {
     pub camera_width: f32,
     #[serde(default)]
     pub camera_height: f32,
+    #[serde(default)]
+    pub camera_size_customized: bool,
+    #[serde(default)]
+    pub show_background_cells: bool,
+    #[serde(default)]
+    pub orientation: CanvasOrientation,
+    #[serde(default)]
+    pub snap_background_objects_to_cells: bool,
 }
 
 impl Default for SceneCanvasSpec {
@@ -36,8 +77,12 @@ impl Default for SceneCanvasSpec {
             show_camera_frame: true,
             camera_x: 0.0,
             camera_y: 0.0,
-            camera_width: 1920.0,
-            camera_height: 1080.0,
+            camera_width: 3840.0,
+            camera_height: 2160.0,
+            camera_size_customized: false,
+            show_background_cells: false,
+            orientation: CanvasOrientation::Landscape,
+            snap_background_objects_to_cells: false,
         }
     }
 }
@@ -77,6 +122,8 @@ pub struct QuartzObjectBlueprint {
     pub enabled: bool,
     #[serde(default)]
     pub lock_transform: bool,
+    #[serde(default)]
+    pub is_background: bool,
     pub advanced: ObjectAdvancedParams,
     pub visible: ObjectParamVisibility,
 }
@@ -100,9 +147,20 @@ impl QuartzObjectBlueprint {
             color_rgb: [255, 255, 255],
             enabled: true,
             lock_transform: false,
+            is_background: false,
             advanced: ObjectAdvancedParams::default(),
             visible: ObjectParamVisibility::default(),
         }
+    }
+
+    pub fn apply_background_defaults(&mut self, cell_w: f32, cell_h: f32) {
+        self.is_background = true;
+        self.w = cell_w.max(1.0);
+        self.h = cell_h.max(1.0);
+        self.layer = -10;
+        self.advanced.gravity = 0.0;
+        self.advanced.momentum_x = 0.0;
+        self.advanced.momentum_y = 0.0;
     }
 }
 
@@ -444,6 +502,8 @@ impl Default for ObjectParamVisibility {
 pub struct LogicTree {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub output_file: String,
     pub nodes: Vec<LogicNode>,
     pub referenced_object_ids: Vec<String>,
 }
@@ -453,6 +513,7 @@ impl LogicTree {
         Self {
             id,
             name,
+            output_file: String::new(),
             nodes: Vec::new(),
             referenced_object_ids: Vec::new(),
         }
@@ -466,6 +527,57 @@ impl LogicTree {
         refs.sort();
         refs.dedup();
         self.referenced_object_ids = refs;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustomCodeKind {
+    Constants,
+    GameStateVars,
+    TypedVars,
+    CustomEvents,
+    UpdateLoops,
+    TopLevel,
+    ManualFileOverride,
+}
+
+impl CustomCodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CustomCodeKind::Constants => "Constants",
+            CustomCodeKind::GameStateVars => "GameStateVars",
+            CustomCodeKind::TypedVars => "TypedVars",
+            CustomCodeKind::CustomEvents => "CustomEvents",
+            CustomCodeKind::UpdateLoops => "UpdateLoops",
+            CustomCodeKind::TopLevel => "TopLevel",
+            CustomCodeKind::ManualFileOverride => "ManualFileOverride",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomCodeBlock {
+    pub id: String,
+    pub name: String,
+    pub kind: CustomCodeKind,
+    #[serde(default)]
+    pub output_file: String,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub custom_event_name: String,
+}
+
+impl CustomCodeBlock {
+    pub fn new(id: String, name: String, kind: CustomCodeKind, output_file: String) -> Self {
+        Self {
+            id,
+            name,
+            kind,
+            output_file,
+            code: String::new(),
+            custom_event_name: String::new(),
+        }
     }
 }
 

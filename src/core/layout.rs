@@ -22,8 +22,8 @@ impl ProjectLayoutPaths {
         Self {
             root: root.to_path_buf(),
             manifest_path: root.join("project.qforge.json"),
-            scenes_dir: root.join("scenes"),
-            scripts_dir: root.join("scripts"),
+            scenes_dir: root.join("src").join("scenes"),
+            scripts_dir: root.join("src").join("scripts"),
             resources_dir: root.join("resources"),
             assets_images_dir: root.join("assets").join("images"),
             assets_audio_dir: root.join("assets").join("audio"),

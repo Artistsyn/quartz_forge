@@ -150,6 +150,20 @@ pub fn event_function_source(
     out
 }
 
+pub fn logic_tree_function_name(tree: &crate::core::quartz_domain::LogicTree) -> String {
+    format!("update_{}", tree.id)
+}
+
+pub fn logic_tree_function_source(tree: &crate::core::quartz_domain::LogicTree) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("pub fn {}(canvas: &mut Canvas) {{\n", logic_tree_function_name(tree)));
+    out.push_str("    canvas.on_update(|canvas| {\n");
+    out.push_str(&format!("        canvas.run({});\n", nodes_to_action_expr(&tree.nodes)));
+    out.push_str("    });\n");
+    out.push_str("}\n");
+    out
+}
+
 pub fn logic_tree_action_expr(tree: &crate::core::quartz_domain::LogicTree) -> String {
     nodes_to_action_expr(&tree.nodes)
 }
