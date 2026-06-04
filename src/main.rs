@@ -1,7 +1,3 @@
-mod app;
-mod core;
-mod services;
-
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -15,6 +11,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Quartz Forge",
         native_options,
-        Box::new(|_cc| Ok(Box::new(app::QuartzForgeApp::default()))),
+        Box::new(|_cc| Ok(Box::new(quartz_forge::app::QuartzForgeApp::default()))),
     )
 }

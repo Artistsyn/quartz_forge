@@ -1,11 +1,11 @@
 use crate::core::project::EditorProjectState;
 use crate::core::quartz_domain::{
     LogicNode, ObjectVisualAssetMode, QuartzAction, QuartzCondition, QuartzEventBinding,
-    QuartzEventKind,
+    QuartzEventKind, QuartzExpr, QuartzExprKind, QuartzMathOp,
 };
 use crate::services::codegen_text::{
     comp_op_expr, key_expr, location_expr, modifiers_expr, mouse_button_expr,
-    physics_material_expr, scroll_axis_expr, target_expr,
+    physics_material_expr, scroll_axis_expr, target_expr, gravity_falloff_expr,
 };
 
 pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
@@ -19,6 +19,11 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
 
     for obj in &scene.objects {
         if !obj.enabled {
+            continue;
+        }
+        if obj.spawn_only {
+            out.push_str(&object_function_source(obj));
+            out.push('\n');
             continue;
         }
         out.push_str(&format!("    let mut {} = GameObject::build(\"{}\")\n", obj.id, obj.id));
@@ -51,6 +56,7 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
             "        .collision_mask({})\n",
             obj.advanced.collision_mask
         ));
+        append_advanced_builder_lines(&mut out, &obj.advanced);
         if obj.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
             if let Some(bytes_expr) = asset_include_expr(&obj.visual_asset_path) {
                 out.push_str(&format!(
@@ -86,7 +92,10 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
     for tree in &scene.logic_trees {
         out.push_str(&format!("    // Update Script: {}\n", tree.name));
         out.push_str("    canvas.on_update(|canvas| {\n");
-        out.push_str(&format!("        canvas.run({});\n", nodes_to_action_expr(&tree.nodes)));
+        for line in emit_action_lines(&tree.nodes, "        ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
         out.push_str("    });\n");
     }
     out.push_str("}\n");
@@ -133,9 +142,19 @@ pub fn event_function_name(binding: &QuartzEventBinding) -> String {
 
 pub fn object_function_source(object: &crate::core::quartz_domain::QuartzObjectBlueprint) -> String {
     let mut out = String::new();
-    out.push_str(&format!("pub fn {}(canvas: &mut Canvas) {{\n", object_function_name(object)));
-    out.push_str(&object_registration_body(object));
-    out.push_str("}\n");
+    if object.spawn_only {
+        // Template functions return a fresh `GameObject` — caller passes it to Action::Spawn.
+        out.push_str(&format!(
+            "pub fn {}(canvas: &mut Canvas) -> GameObject {{\n",
+            object_function_name(object)
+        ));
+        out.push_str(&spawn_template_body(object));
+        out.push_str("}\n");
+    } else {
+        out.push_str(&format!("pub fn {}(canvas: &mut Canvas) {{\n", object_function_name(object)));
+        out.push_str(&object_registration_body(object));
+        out.push_str("}\n");
+    }
     out
 }
 
@@ -158,7 +177,10 @@ pub fn logic_tree_function_source(tree: &crate::core::quartz_domain::LogicTree) 
     let mut out = String::new();
     out.push_str(&format!("pub fn {}(canvas: &mut Canvas) {{\n", logic_tree_function_name(tree)));
     out.push_str("    canvas.on_update(|canvas| {\n");
-    out.push_str(&format!("        canvas.run({});\n", nodes_to_action_expr(&tree.nodes)));
+    for line in emit_action_lines(&tree.nodes, "        ") {
+        out.push_str(&line);
+        out.push('\n');
+    }
     out.push_str("    });\n");
     out.push_str("}\n");
     out
@@ -211,6 +233,7 @@ pub fn object_registration_body(object: &crate::core::quartz_domain::QuartzObjec
         "        .collision_mask({})\n",
         object.advanced.collision_mask
     ));
+    append_advanced_builder_lines(&mut out, &object.advanced);
     if object.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
         if let Some(bytes_expr) = asset_include_expr(&object.visual_asset_path) {
             out.push_str(&format!(
@@ -245,6 +268,148 @@ pub fn object_registration_body(object: &crate::core::quartz_domain::QuartzObjec
     out
 }
 
+/// Like `object_registration_body` but for spawn-only templates:
+/// builds the `GameObject` and returns it — does NOT call `canvas.add_game_object()`.
+/// The caller (Spawn action) passes the returned value to `Action::Spawn { object: Box::new(...) }`.
+pub fn spawn_template_body(object: &crate::core::quartz_domain::QuartzObjectBlueprint) -> String {
+    use crate::core::quartz_domain::ObjectVisualAssetMode;
+    let mut out = String::new();
+    out.push_str(&format!("    let mut {} = GameObject::build(\"{}\")\n", object.id, object.id));
+    out.push_str(&format!("        .size({}, {})\n", object.w, object.h));
+    out.push_str(&format!("        .position({}, {})\n", object.x, object.y));
+    out.push_str(&format!("        .layer({})\n", object.layer));
+    out.push_str(&format!(
+        "        .momentum({}, {})\n",
+        object.advanced.momentum_x, object.advanced.momentum_y
+    ));
+    out.push_str(&format!(
+        "        .resistance({}, {})\n",
+        object.advanced.resistance_x, object.advanced.resistance_y
+    ));
+    out.push_str(&format!("        .gravity({})\n", object.advanced.gravity));
+    out.push_str(&format!("        .rotation({})\n", object.advanced.rotation_deg));
+    out.push_str(&format!(
+        "        .pivot({}, {})\n",
+        object.advanced.pivot_x, object.advanced.pivot_y
+    ));
+    out.push_str(&format!(
+        "        .material({})\n",
+        physics_material_expr(&object.advanced.material)
+    ));
+    out.push_str(&format!(
+        "        .collision_layer({})\n",
+        object.advanced.collision_layer
+    ));
+    out.push_str(&format!(
+        "        .collision_mask({})\n",
+        object.advanced.collision_mask
+    ));
+    append_advanced_builder_lines(&mut out, &object.advanced);
+    if object.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
+        if let Some(bytes_expr) = asset_include_expr(&object.visual_asset_path) {
+            out.push_str(&format!(
+                "        .image(quartz::sprite::load_image({}))\n",
+                bytes_expr
+            ));
+        }
+    }
+    if !object.tags.is_empty() {
+        for tag in &object.tags {
+            out.push_str(&format!("        .tag(\"{}\")\n", tag));
+        }
+    }
+    // Build and return — no canvas.add_game_object() for templates
+    out.push_str("        .build(canvas);\n");
+    if object.visual_asset_mode == ObjectVisualAssetMode::AnimatedSprite {
+        if let Some(bytes_expr) = asset_include_expr(&object.visual_asset_path) {
+            out.push_str(&format!(
+                "    {}.set_animation(quartz::sprite::load_animation({}, ({}, {}), {}));\n",
+                object.id, bytes_expr, object.w, object.h, object.visual_asset_fps
+            ));
+        }
+    }
+    out.push_str(&format!("    {}\n", object.id));
+    out
+}
+
+fn append_advanced_builder_lines(
+    out: &mut String,
+    advanced: &crate::core::quartz_domain::ObjectAdvancedParams,
+) {
+    if advanced.slope_enabled {
+        if advanced.slope_auto_rotation {
+            out.push_str(&format!(
+                "        .slope_auto_rotation({}, {})\n",
+                advanced.slope_left_offset, advanced.slope_right_offset
+            ));
+        } else {
+            out.push_str(&format!(
+                "        .slope({}, {})\n",
+                advanced.slope_left_offset, advanced.slope_right_offset
+            ));
+        }
+    }
+    if advanced.one_way {
+        out.push_str("        .one_way()\n");
+    }
+    if advanced.surface_velocity_enabled {
+        out.push_str(&format!(
+            "        .surface_velocity({})\n",
+            advanced.surface_velocity_x
+        ));
+    }
+    if advanced.surface_normal_enabled {
+        out.push_str(&format!(
+            "        .surface({}, {})\n",
+            advanced.surface_normal_x, advanced.surface_normal_y
+        ));
+    }
+    if advanced.align_to_slope {
+        out.push_str("        .align_to_slope()\n");
+        out.push_str(&format!(
+            "        .align_to_slope_speed({})\n",
+            advanced.align_to_slope_speed
+        ));
+    }
+    if advanced.planet_enabled {
+        out.push_str(&format!("        .planet({})\n", advanced.planet_radius));
+    }
+    if advanced.gravity_target_enabled && !advanced.gravity_target_tag.trim().is_empty() {
+        out.push_str(&format!(
+            "        .gravity_target(\"{}\")\n",
+            advanced.gravity_target_tag
+        ));
+    }
+    out.push_str(&format!(
+        "        .gravity_strength({})\n",
+        advanced.gravity_strength
+    ));
+    out.push_str(&format!(
+        "        .gravity_influence_mult({})\n",
+        advanced.gravity_influence_mult
+    ));
+    out.push_str(&format!(
+        "        .gravity_falloff({})\n",
+        gravity_falloff_expr(advanced.gravity_falloff)
+    ));
+    if advanced.gravity_all_sources {
+        out.push_str("        .all_gravity_sources()\n");
+    }
+    if advanced.gravity_identity_enabled && !advanced.gravity_identity.trim().is_empty() {
+        out.push_str(&format!(
+            "        .gravity_identity(\"{}\")\n",
+            advanced.gravity_identity
+        ));
+    }
+    if advanced.auto_align {
+        out.push_str("        .auto_align()\n");
+        out.push_str(&format!(
+            "        .auto_align_speed({})\n",
+            advanced.auto_align_speed
+        ));
+    }
+}
+
 pub fn event_binding_body(
     binding: &QuartzEventBinding,
     logic_trees: &[crate::core::quartz_domain::LogicTree],
@@ -269,7 +434,7 @@ pub fn event_binding_body(
 
 fn node_to_action_expr(node: &LogicNode) -> String {
     match node {
-        LogicNode::Action(action) => action_expr(action),
+        LogicNode::Action(action) => action_expr_inner(action),
         LogicNode::Branch {
             condition,
             then_nodes,
@@ -295,7 +460,7 @@ fn node_to_action_expr(node: &LogicNode) -> String {
     }
 }
 
-fn action_expr(action: &QuartzAction) -> String {
+fn action_expr_inner(action: &QuartzAction) -> String {
     match action {
         QuartzAction::Teleport { target, location } => format!(
             "Action::Teleport {{ target: {}, location: {} }}",
@@ -385,10 +550,23 @@ fn action_expr(action: &QuartzAction) -> String {
                 "Action::Custom { name: \"missing_animation_asset\".to_owned() }".to_owned()
             }
         }
+        QuartzAction::PlaySound {
+            path,
+            volume,
+            looping,
+        } => format!(
+            "Action::PlaySound {{ path: \"{}\".to_owned(), options: SoundOptions::new().volume({}).looping({}) }}",
+            path,
+            volume,
+            looping
+        ),
         QuartzAction::SetZoom { value } => format!("Action::SetZoom {{ value: {} }}", value),
         QuartzAction::SmoothZoom { value } => format!("Action::SmoothZoom {{ value: {} }}", value),
         QuartzAction::RunPlugin { name, data } => {
             format!("Action::RunPlugin {{ name: \"{}\".to_owned(), data: \"{}\".to_owned() }}", name, data)
+        }
+        QuartzAction::Expr { raw } => {
+            format!("Action::expr(\"{}\")", raw)
         }
         QuartzAction::Custom { name } => {
             format!("Action::Custom {{ name: \"{}\".to_owned() }}", name)
@@ -414,18 +592,47 @@ fn action_expr(action: &QuartzAction) -> String {
             "Action::CameraZoomPunch {{ amount: {}, duration: {} }}",
             amount, duration_s
         ),
+        QuartzAction::SetVar { name, value } => format!(
+            "Action::SetVar {{ name: {:?}.to_owned(), value: {} }}",
+            name,
+            quartz_expr_to_code(value)
+        ),
+        QuartzAction::ModVar { name, op, operand } => format!(
+            "Action::ModVar {{ name: {:?}.to_owned(), op: {}, operand: {} }}",
+            name,
+            quartz_math_op_code(op),
+            quartz_expr_to_code(operand)
+        ),
+        QuartzAction::SpawnObject { template_id, location } => format!(
+            "Action::Spawn {{ object: Box::new(spawn_{}(canvas)), location: {} }}",
+            template_id,
+            location_expr(location)
+        ),
+        QuartzAction::SetText {
+            target,
+            content,
+            font_size,
+            color_rgb,
+            font_asset_path,
+        } => {
+            format!(
+                "Action::SetText {{ target: {}, text: {} }}",
+                target_expr(target),
+                set_text_value_expr(content, *font_size, color_rgb, font_asset_path)
+            )
+        }
         QuartzAction::Conditional {
             condition,
             if_true,
             if_false,
         } => {
-            let if_true_expr = action_expr(if_true);
+            let if_true_expr = action_expr_inner(if_true);
             if let Some(if_false) = if_false {
                 format!(
                     "Action::Conditional {{ condition: {}, if_true: Box::new({}), if_false: Some(Box::new({})) }}",
                     condition_expr(condition),
                     if_true_expr,
-                    action_expr(if_false)
+                    action_expr_inner(if_false)
                 )
             } else {
                 format!(
@@ -436,8 +643,141 @@ fn action_expr(action: &QuartzAction) -> String {
             }
         }
         QuartzAction::Multi { actions } => {
-            let parts = actions.iter().map(action_expr).collect::<Vec<_>>().join(", ");
+            let parts = actions.iter().map(|a| action_expr_inner(a)).collect::<Vec<_>>().join(", ");
             format!("Action::Multi(vec![{}])", parts)
+        }
+    }
+}
+
+fn quartz_expr_to_code(expr: &QuartzExpr) -> String {
+    match expr.kind {
+        QuartzExprKind::F32  => format!("Expr::f32({}f32)", expr.raw),
+        QuartzExprKind::I32  => format!("Expr::i32({}i32)", expr.raw),
+        QuartzExprKind::Bool => format!("Expr::bool({})", expr.raw),
+        QuartzExprKind::Str  => format!("Expr::str({:?})", expr.raw),
+        QuartzExprKind::Var  => format!("Expr::var({:?})", expr.raw),
+    }
+}
+
+fn quartz_math_op_code(op: &QuartzMathOp) -> &'static str {
+    match op {
+        QuartzMathOp::Add => "MathOp::Add",
+        QuartzMathOp::Sub => "MathOp::Sub",
+        QuartzMathOp::Mul => "MathOp::Mul",
+        QuartzMathOp::Div => "MathOp::Div",
+    }
+}
+
+fn set_text_font_expr(font_asset_path: &str) -> String {
+    if let Some(bytes_expr) = asset_include_expr(font_asset_path) {
+        format!(
+            "{{ static QF_SET_TEXT_FONT: std::sync::OnceLock<Font> = std::sync::OnceLock::new(); std::sync::Arc::new(QF_SET_TEXT_FONT.get_or_init(|| Font::from_bytes({bytes_expr}).expect(\"failed to load SetText font\")).clone()) }}"
+        )
+    } else {
+        "std::sync::Arc::new(Font::default())".to_owned()
+    }
+}
+
+fn set_text_value_expr(
+    content: &str,
+    font_size: f32,
+    color_rgb: &[u8; 3],
+    font_asset_path: &str,
+) -> String {
+    let [r, g, b] = *color_rgb;
+    let line_height = font_size * 1.25;
+    let font_expr = set_text_font_expr(font_asset_path);
+    format!(
+        "{{ let font = {font_expr}; Text::new(vec![Span::new({content:?}.to_owned(), {font_size}f32, Some({line_height}f32), font, Color::from_rgb({r}, {g}, {b}), 0.0)], None, Align::Left, None) }}"
+    )
+}
+
+/// Returns an action expression while preserving the recursive plumbing used by emit_action_lines.
+/// SetText now emits direct Text::new/Span::new expressions, so no prelude is needed.
+fn action_expr_with_prelude(
+    action: &QuartzAction,
+    prelude: &mut Vec<String>,
+    counter: &mut usize,
+) -> String {
+    match action {
+        QuartzAction::Multi { actions } => {
+            let parts = actions
+                .iter()
+                .map(|a| action_expr_with_prelude(a, prelude, counter))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Action::Multi(vec![{parts}])")
+        }
+        QuartzAction::Conditional { condition, if_true, if_false } => {
+            let if_true_expr = action_expr_with_prelude(if_true, prelude, counter);
+            if let Some(if_false) = if_false {
+                let if_false_expr = action_expr_with_prelude(if_false, prelude, counter);
+                format!(
+                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: Some(Box::new({if_false_expr})) }}",
+                    condition_expr(condition)
+                )
+            } else {
+                format!(
+                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: None }}",
+                    condition_expr(condition)
+                )
+            }
+        }
+        other => action_expr_inner(other),
+    }
+}
+
+/// Emit the canonical statements for a nodes list inside an on_update/event handler body.
+/// Returns lines to push at the call-site indentation level.
+pub fn emit_action_lines(nodes: &[LogicNode], indent: &str) -> Vec<String> {
+    let mut prelude: Vec<String> = Vec::new();
+    let mut counter = 0usize;
+    let root_action = nodes_to_action_expr_rec(nodes, &mut prelude, &mut counter);
+    let mut lines: Vec<String> = prelude.iter().map(|s| format!("{indent}{s}")).collect();
+    lines.push(format!("{indent}canvas.run({root_action});"));
+    lines
+}
+
+fn nodes_to_action_expr_rec(
+    nodes: &[LogicNode],
+    prelude: &mut Vec<String>,
+    counter: &mut usize,
+) -> String {
+    match nodes {
+        [] => "Action::Multi(vec![])".to_owned(),
+        [single] => node_to_action_expr_rec(single, prelude, counter),
+        many => {
+            let parts = many
+                .iter()
+                .map(|n| node_to_action_expr_rec(n, prelude, counter))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Action::Multi(vec![{parts}])")
+        }
+    }
+}
+
+fn node_to_action_expr_rec(
+    node: &LogicNode,
+    prelude: &mut Vec<String>,
+    counter: &mut usize,
+) -> String {
+    match node {
+        LogicNode::Action(a) => action_expr_with_prelude(a, prelude, counter),
+        LogicNode::Branch { condition, then_nodes, else_nodes } => {
+            let if_true_expr = nodes_to_action_expr_rec(then_nodes, prelude, counter);
+            if !else_nodes.is_empty() {
+                let if_false_expr = nodes_to_action_expr_rec(else_nodes, prelude, counter);
+                format!(
+                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: Some(Box::new({if_false_expr})) }}",
+                    condition_expr(condition)
+                )
+            } else {
+                format!(
+                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: None }}",
+                    condition_expr(condition)
+                )
+            }
         }
     }
 }
@@ -450,6 +790,12 @@ fn condition_expr(condition: &QuartzCondition) -> String {
         }
         QuartzCondition::KeyNotHeld { key } => {
             format!("Condition::KeyNotHeld({})", key_expr(key))
+        }
+        QuartzCondition::Collision { target } => {
+            format!("Condition::Collision({})", target_expr(target))
+        }
+        QuartzCondition::NoCollision { target } => {
+            format!("Condition::NoCollision({})", target_expr(target))
         }
         QuartzCondition::CollisionWith { object_a, object_b } => {
             format!(
@@ -467,6 +813,12 @@ fn condition_expr(condition: &QuartzCondition) -> String {
             comp_op_expr(*op),
             value
         ),
+        QuartzCondition::VarExists { variable } => {
+            format!("Condition::VarExists(\"{}\".to_owned())", variable)
+        }
+        QuartzCondition::Expr { raw } => {
+            format!("Condition::expr(\"{}\")", raw)
+        }
         QuartzCondition::And { left, right } => {
             format!(
                 "Condition::And(Box::new({}), Box::new({}))",
@@ -664,7 +1016,7 @@ fn event_expr(binding: &QuartzEventBinding, action_target_expr: &str, action_exp
 
 fn event_action_expr(binding: &QuartzEventBinding) -> String {
     if let Some(action) = &binding.action {
-        action_expr(action)
+        action_expr_inner(action)
     } else {
         "Action::Custom { name: \"event_action\".to_owned() }".to_owned()
     }

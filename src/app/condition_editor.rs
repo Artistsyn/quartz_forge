@@ -21,7 +21,11 @@ impl QuartzForgeApp {
             QuartzCondition::Always => "Always",
             QuartzCondition::KeyHeld { .. } => "KeyHeld",
             QuartzCondition::KeyNotHeld { .. } => "KeyNotHeld",
+            QuartzCondition::Collision { .. } => "Collision",
+            QuartzCondition::NoCollision { .. } => "NoCollision",
             QuartzCondition::VarCompare { .. } => "VarCompare",
+            QuartzCondition::VarExists { .. } => "VarExists",
+            QuartzCondition::Expr { .. } => "Expr",
             QuartzCondition::IsVisible { .. } => "IsVisible",
             QuartzCondition::IsHidden { .. } => "IsHidden",
             QuartzCondition::IsMoving { .. } => "IsMoving",
@@ -45,8 +49,12 @@ impl QuartzForgeApp {
                     "Always",
                     "KeyHeld",
                     "KeyNotHeld",
+                    "Collision",
+                    "NoCollision",
                     "CollisionWith",
                     "VarCompare",
+                    "VarExists",
+                    "Expr",
                     "IsVisible",
                     "IsHidden",
                     "IsMoving",
@@ -73,6 +81,12 @@ impl QuartzForgeApp {
             "KeyNotHeld" => Some(QuartzCondition::KeyNotHeld {
                 key: "Space".to_owned(),
             }),
+            "Collision" => Some(QuartzCondition::Collision {
+                target: QuartzTargetRef::Name("player".to_owned()),
+            }),
+            "NoCollision" => Some(QuartzCondition::NoCollision {
+                target: QuartzTargetRef::Name("player".to_owned()),
+            }),
             "CollisionWith" => Some(QuartzCondition::CollisionWith {
                 object_a: "player".to_owned(),
                 object_b: "enemy".to_owned(),
@@ -81,6 +95,12 @@ impl QuartzForgeApp {
                 variable: "score".to_owned(),
                 op: CompareOp::Ge,
                 value: 10.0,
+            }),
+            "VarExists" => Some(QuartzCondition::VarExists {
+                variable: "score".to_owned(),
+            }),
+            "Expr" => Some(QuartzCondition::Expr {
+                raw: "score > 10".to_owned(),
             }),
             "IsVisible" => Some(QuartzCondition::IsVisible {
                 target: QuartzTargetRef::Name("player".to_owned()),
@@ -139,6 +159,9 @@ impl QuartzForgeApp {
             QuartzCondition::KeyHeld { key } | QuartzCondition::KeyNotHeld { key } => {
                 changed |= ui.text_edit_singleline(key).changed();
             }
+            QuartzCondition::Collision { target } | QuartzCondition::NoCollision { target } => {
+                changed |= Self::edit_target_ref(ui, "target", target);
+            }
             QuartzCondition::CollisionWith { object_a, object_b } => {
                 ui.label("object_a");
                 changed |= ui.text_edit_singleline(object_a).changed();
@@ -162,6 +185,14 @@ impl QuartzForgeApp {
                         changed |= ui.selectable_value(op, CompareOp::Gt, ">").changed();
                         changed |= ui.selectable_value(op, CompareOp::Ge, ">=").changed();
                     });
+            }
+            QuartzCondition::VarExists { variable } => {
+                ui.label("variable");
+                changed |= ui.text_edit_singleline(variable).changed();
+            }
+            QuartzCondition::Expr { raw } => {
+                ui.label("expr source");
+                changed |= ui.text_edit_singleline(raw).changed();
             }
             QuartzCondition::IsVisible { target }
             | QuartzCondition::IsHidden { target }

@@ -252,6 +252,29 @@ impl EditorProjectState {
         }
     }
 
+    pub fn add_spawn_only_object_to_active_scene(&mut self) {
+        let scene_name = self
+            .manifest
+            .scenes
+            .get(self.active_scene_index)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "scene".to_owned());
+        let scene_source_file = self
+            .manifest
+            .scenes
+            .get(self.active_scene_index)
+            .map(|s| s.source_file.clone())
+            .unwrap_or_default();
+        let (id, name) = self.manifest.next_object_identity(&scene_name);
+        if let Some(scene) = self.manifest.scenes.get_mut(self.active_scene_index) {
+            let mut obj = QuartzObjectBlueprint::new(id, format!("{}_spawn", name));
+            obj.output_file = scene_source_file;
+            obj.apply_spawn_only_defaults();
+            scene.objects.push(obj);
+            self.dirty = true;
+        }
+    }
+
     pub fn add_logic_tree_to_active_scene(&mut self) {
         let scene_source_file = self
             .manifest

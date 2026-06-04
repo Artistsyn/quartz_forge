@@ -1,0 +1,16 @@
+{
+    "servers": {
+        "quartz_forge_mcp": {
+            "command": "cargo",
+            "args": [
+                "run",
+                "--manifest-path",
+                "quartz_forge/Cargo.toml",
+                "--bin",
+                "quartz_forge_mcp",
+                "--",
+                "--stdio"
+            ]
+        }
+    }
+}

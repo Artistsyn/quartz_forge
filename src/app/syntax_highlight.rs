@@ -1,6 +1,26 @@
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use eframe::egui;
+
+const MAX_HIGHLIGHT_CACHE_ENTRIES: usize = 32;
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct HighlightCacheKey {
+    text: String,
+    wrap_width_bits: u32,
+}
+
+#[derive(Default)]
+struct HighlightCache {
+    order: VecDeque<HighlightCacheKey>,
+    jobs: HashMap<HighlightCacheKey, egui::text::LayoutJob>,
+}
+
+fn highlight_cache() -> &'static Mutex<HighlightCache> {
+    static CACHE: OnceLock<Mutex<HighlightCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HighlightCache::default()))
+}
 
 pub fn highlight_rust_layout(text: &str, wrap_width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
@@ -80,7 +100,35 @@ pub fn highlight_rust_layout(text: &str, wrap_width: f32) -> egui::text::LayoutJ
 }
 
 pub fn code_layouter(ui: &egui::Ui, text: &str, wrap_width: f32) -> Arc<egui::text::Galley> {
-    let job = highlight_rust_layout(text, wrap_width);
+    let wrap_width = wrap_width.max(0.0).round();
+    let key = HighlightCacheKey {
+        text: text.to_owned(),
+        wrap_width_bits: wrap_width.to_bits(),
+    };
+
+    let cached = highlight_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.jobs.get(&key).cloned());
+
+    let job = if let Some(job) = cached {
+        job
+    } else {
+        let job = highlight_rust_layout(text, wrap_width);
+        if let Ok(mut cache) = highlight_cache().lock() {
+            if !cache.jobs.contains_key(&key) {
+                if cache.order.len() >= MAX_HIGHLIGHT_CACHE_ENTRIES {
+                    if let Some(oldest) = cache.order.pop_front() {
+                        cache.jobs.remove(&oldest);
+                    }
+                }
+                cache.order.push_back(key.clone());
+            }
+            cache.jobs.insert(key, job.clone());
+        }
+        job
+    };
+
     ui.fonts(|f| f.layout_job(job))
 }
 

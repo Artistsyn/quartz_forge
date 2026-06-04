@@ -2,7 +2,8 @@ use eframe::egui::{self, Slider};
 
 use super::QuartzForgeApp;
 use crate::core::quartz_domain::{
-    QuartzAction, QuartzCondition, QuartzLocationRef, QuartzTargetRef,
+    QuartzAction, QuartzCondition, QuartzExpr, QuartzExprKind, QuartzLocationRef, QuartzMathOp,
+    QuartzTargetRef,
 };
 
 impl QuartzForgeApp {
@@ -80,13 +81,19 @@ impl QuartzForgeApp {
             QuartzAction::AddTag { .. } => "AddTag",
             QuartzAction::RemoveTag { .. } => "RemoveTag",
             QuartzAction::SetAnimation { .. } => "SetAnimation",
+            QuartzAction::PlaySound { .. } => "PlaySound",
             QuartzAction::SetZoom { .. } => "SetZoom",
             QuartzAction::SmoothZoom { .. } => "SmoothZoom",
             QuartzAction::RunPlugin { .. } => "RunPlugin",
+            QuartzAction::Expr { .. } => "Expr",
             QuartzAction::Custom { .. } => "Custom",
             QuartzAction::CameraFlash { .. } => "CameraFlash",
             QuartzAction::CameraShake { .. } => "CameraShake",
             QuartzAction::CameraZoomPunch { .. } => "CameraZoomPunch",
+            QuartzAction::SetVar { .. } => "SetVar",
+            QuartzAction::ModVar { .. } => "ModVar",
+            QuartzAction::SpawnObject { .. } => "SpawnObject",
+            QuartzAction::SetText { .. } => "SetText",
             QuartzAction::Conditional { .. } => "Conditional",
             QuartzAction::Multi { .. } => "Multi",
         };
@@ -140,11 +147,15 @@ impl QuartzForgeApp {
                 changed |= ui
                     .selectable_value(&mut action_kind, "SetAnimation", "SetAnimation")
                     .changed();
+                changed |= ui
+                    .selectable_value(&mut action_kind, "PlaySound", "PlaySound")
+                    .changed();
                 changed |= ui.selectable_value(&mut action_kind, "SetZoom", "SetZoom").changed();
                 changed |= ui
                     .selectable_value(&mut action_kind, "SmoothZoom", "SmoothZoom")
                     .changed();
                 changed |= ui.selectable_value(&mut action_kind, "RunPlugin", "RunPlugin").changed();
+                changed |= ui.selectable_value(&mut action_kind, "Expr", "Expr").changed();
                 changed |= ui.selectable_value(&mut action_kind, "Custom", "Custom").changed();
                 changed |= ui
                     .selectable_value(&mut action_kind, "CameraFlash", "CameraFlash")
@@ -161,6 +172,12 @@ impl QuartzForgeApp {
                 changed |= ui
                     .selectable_value(&mut action_kind, "Multi", "Multi")
                     .changed();
+                changed |= ui.selectable_value(&mut action_kind, "SetVar", "SetVar").changed();
+                changed |= ui.selectable_value(&mut action_kind, "ModVar", "ModVar").changed();
+                changed |= ui
+                    .selectable_value(&mut action_kind, "SpawnObject", "SpawnObject")
+                    .changed();
+                changed |= ui.selectable_value(&mut action_kind, "SetText", "SetText").changed();
             });
 
         let replacement = match action_kind {
@@ -246,11 +263,19 @@ impl QuartzForgeApp {
                 animation_asset: "assets/images/anim.gif".to_owned(),
                 fps: 12.0,
             }),
+            "PlaySound" => Some(QuartzAction::PlaySound {
+                path: "assets/audio/sfx.ogg".to_owned(),
+                volume: 0.25,
+                looping: false,
+            }),
             "SetZoom" => Some(QuartzAction::SetZoom { value: 1.0 }),
             "SmoothZoom" => Some(QuartzAction::SmoothZoom { value: 1.0 }),
             "RunPlugin" => Some(QuartzAction::RunPlugin {
                 name: "plugin_name".to_owned(),
                 data: "payload".to_owned(),
+            }),
+            "Expr" => Some(QuartzAction::Expr {
+                raw: "player_x > 0.0".to_owned(),
             }),
             "Custom" => Some(QuartzAction::Custom {
                 name: "custom_action".to_owned(),
@@ -280,6 +305,26 @@ impl QuartzForgeApp {
                 actions: vec![QuartzAction::Custom {
                     name: "step_action".to_owned(),
                 }],
+            }),
+            "SetVar" => Some(QuartzAction::SetVar {
+                name: "my_var".to_owned(),
+                value: QuartzExpr::default(),
+            }),
+            "ModVar" => Some(QuartzAction::ModVar {
+                name: "score".to_owned(),
+                op: QuartzMathOp::Add,
+                operand: QuartzExpr { kind: QuartzExprKind::I32, raw: "1".to_owned() },
+            }),
+            "SpawnObject" => Some(QuartzAction::SpawnObject {
+                template_id: "enemy".to_owned(),
+                location: QuartzLocationRef::At { x: 400.0, y: 300.0 },
+            }),
+            "SetText" => Some(QuartzAction::SetText {
+                target: QuartzTargetRef::Name("label".to_owned()),
+                content: "Hello".to_owned(),
+                font_size: 24.0,
+                color_rgb: [255, 255, 255],
+                font_asset_path: String::new(),
             }),
             _ => None,
         };
@@ -368,6 +413,16 @@ impl QuartzForgeApp {
                 changed |= ui.text_edit_singleline(animation_asset).changed();
                 changed |= ui.add(Slider::new(fps, 1.0..=60.0).text("fps")).changed();
             }
+            QuartzAction::PlaySound {
+                path,
+                volume,
+                looping,
+            } => {
+                ui.label("sound asset path (relative to project root)");
+                changed |= ui.text_edit_singleline(path).changed();
+                changed |= ui.add(Slider::new(volume, 0.0..=1.0).text("volume")).changed();
+                changed |= ui.checkbox(looping, "looping").changed();
+            }
             QuartzAction::SetZoom { value } | QuartzAction::SmoothZoom { value } => {
                 changed |= ui.add(Slider::new(value, 0.1..=6.0).text("value")).changed();
             }
@@ -376,6 +431,10 @@ impl QuartzForgeApp {
                 changed |= ui.text_edit_singleline(name).changed();
                 ui.label("plugin data payload");
                 changed |= ui.text_edit_singleline(data).changed();
+            }
+            QuartzAction::Expr { raw } => {
+                ui.label("action expr source");
+                changed |= ui.text_edit_singleline(raw).changed();
             }
             QuartzAction::Custom { name } => {
                 ui.label("custom action name");
@@ -457,9 +516,105 @@ impl QuartzForgeApp {
                     changed = true;
                 }
             }
+            QuartzAction::SetVar { name, value } => {
+                ui.label("variable name");
+                changed |= ui.text_edit_singleline(name).changed();
+                Self::edit_quartz_expr(ui, "value", value, &mut changed);
+            }
+            QuartzAction::ModVar { name, op, operand } => {
+                ui.label("variable name");
+                changed |= ui.text_edit_singleline(name).changed();
+                let mut op_kind = match op {
+                    QuartzMathOp::Add => "+=",
+                    QuartzMathOp::Sub => "-=",
+                    QuartzMathOp::Mul => "*=",
+                    QuartzMathOp::Div => "/=",
+                };
+                egui::ComboBox::from_label("op")
+                    .selected_text(op_kind)
+                    .show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut op_kind, "+=", "+=").changed();
+                        changed |= ui.selectable_value(&mut op_kind, "-=", "-=").changed();
+                        changed |= ui.selectable_value(&mut op_kind, "*=", "*=").changed();
+                        changed |= ui.selectable_value(&mut op_kind, "/=", "/=").changed();
+                    });
+                let next_op = match op_kind {
+                    "+=" => QuartzMathOp::Add,
+                    "-=" => QuartzMathOp::Sub,
+                    "*=" => QuartzMathOp::Mul,
+                    "/=" => QuartzMathOp::Div,
+                    _ => QuartzMathOp::Add,
+                };
+                if *op != next_op { *op = next_op; changed = true; }
+                Self::edit_quartz_expr(ui, "operand", operand, &mut changed);
+            }
+            QuartzAction::SpawnObject { template_id, location } => {
+                ui.label("template object id (must be a spawn-only object)");
+                changed |= ui.text_edit_singleline(template_id).changed();
+                match location {
+                    QuartzLocationRef::At { x, y } => {
+                        changed |= ui.add(Slider::new(x, -8000.0..=8000.0).text("x")).changed();
+                        changed |= ui.add(Slider::new(y, -8000.0..=8000.0).text("y")).changed();
+                    }
+                    QuartzLocationRef::AtTarget(t) => {
+                        changed |= Self::edit_target_ref(ui, "at target", t);
+                    }
+                }
+            }
+            QuartzAction::SetText { target, content, font_size, color_rgb, font_asset_path } => {
+                ui.label("SetText emits Text::new + Span::new. Optional font path enables cached include_bytes font loading.");
+                changed |= Self::edit_target_ref(ui, "target", target);
+                ui.label("text content");
+                changed |= ui.text_edit_singleline(content).changed();
+                changed |= ui.add(Slider::new(font_size, 6.0..=128.0).text("font_size")).changed();
+                ui.label("font asset path (optional, relative to project root)");
+                changed |= ui.text_edit_singleline(font_asset_path).changed();
+                ui.label("color RGB");
+                let mut r = color_rgb[0] as f32;
+                let mut g = color_rgb[1] as f32;
+                let mut b = color_rgb[2] as f32;
+                if ui.add(Slider::new(&mut r, 0.0..=255.0).text("R")).changed() {
+                    color_rgb[0] = r as u8; changed = true;
+                }
+                if ui.add(Slider::new(&mut g, 0.0..=255.0).text("G")).changed() {
+                    color_rgb[1] = g as u8; changed = true;
+                }
+                if ui.add(Slider::new(&mut b, 0.0..=255.0).text("B")).changed() {
+                    color_rgb[2] = b as u8; changed = true;
+                }
+            }
         }
 
         changed
+    }
+
+    fn edit_quartz_expr(ui: &mut egui::Ui, label: &str, expr: &mut QuartzExpr, changed: &mut bool) {
+        ui.label(label);
+        let mut kind_str = match expr.kind {
+            QuartzExprKind::F32 => "f32",
+            QuartzExprKind::I32 => "i32",
+            QuartzExprKind::Bool => "bool",
+            QuartzExprKind::Str => "str",
+            QuartzExprKind::Var => "var",
+        };
+        egui::ComboBox::from_label(format!("{label} type"))
+            .selected_text(kind_str)
+            .show_ui(ui, |ui| {
+                *changed |= ui.selectable_value(&mut kind_str, "f32", "f32").changed();
+                *changed |= ui.selectable_value(&mut kind_str, "i32", "i32").changed();
+                *changed |= ui.selectable_value(&mut kind_str, "bool", "bool").changed();
+                *changed |= ui.selectable_value(&mut kind_str, "str", "str").changed();
+                *changed |= ui.selectable_value(&mut kind_str, "var", "var (variable name)").changed();
+            });
+        let next_kind = match kind_str {
+            "f32"  => QuartzExprKind::F32,
+            "i32"  => QuartzExprKind::I32,
+            "bool" => QuartzExprKind::Bool,
+            "str"  => QuartzExprKind::Str,
+            _      => QuartzExprKind::Var,
+        };
+        if expr.kind != next_kind { expr.kind = next_kind; *changed = true; }
+        *changed |= ui.text_edit_singleline(&mut expr.raw).changed();
     }
 
 }

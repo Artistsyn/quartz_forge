@@ -1,5 +1,6 @@
 use crate::core::quartz_domain::{
-    CompareOp, ObjectPhysicsMaterialPreset, ObjectPhysicsMaterialSpec, QuartzKeyModifiers,
+    CompareOp, ObjectPhysicsMaterialPreset, ObjectPhysicsMaterialSpec, QuartzGravityFalloff,
+    QuartzKeyModifiers,
     QuartzLocationRef, QuartzMouseButtonFilter, QuartzScrollAxisFilter, QuartzTargetRef,
 };
 
@@ -97,5 +98,13 @@ pub(crate) fn physics_material_expr(material: &ObjectPhysicsMaterialSpec) -> Str
                 "PhysicsMaterial::default()".to_owned()
             }
         }
+    }
+}
+
+pub(crate) fn gravity_falloff_expr(falloff: QuartzGravityFalloff) -> &'static str {
+    match falloff {
+        QuartzGravityFalloff::Constant => "GravityFalloff::Constant",
+        QuartzGravityFalloff::Linear => "GravityFalloff::Linear",
+        QuartzGravityFalloff::InverseSquare => "GravityFalloff::InverseSquare",
     }
 }

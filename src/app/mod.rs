@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod editors;
 mod condition_editor;
@@ -13,12 +13,23 @@ use image::AnimationDecoder;
 use crate::core::project::{EditorProjectState, SceneDocument, SceneKind};
 use crate::core::quartz_domain::{
     CanvasOrientation, CustomCodeKind, ObjectPhysicsMaterialPreset, ObjectTemplate,
+    QuartzGravityFalloff,
     ObjectVisualAssetMode, SceneCanvasSpec,
 };
 use crate::services::codegen;
 use crate::services::hot_reload::{HotReloadService, PreviewState};
 use crate::services::persistence;
 use crate::app::syntax_highlight::code_layouter;
+
+#[derive(Debug, Clone, Copy)]
+enum CanvasDragMode {
+    Move,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
+    ResizeBottomRight,
+    Rotate,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CanvasDrag {
@@ -29,7 +40,10 @@ struct CanvasDrag {
     start_y: f32,
     start_w: f32,
     start_h: f32,
-    resizing: bool,
+    start_rotation_deg: f32,
+    pivot_world_x: f32,
+    pivot_world_y: f32,
+    mode: CanvasDragMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +63,31 @@ enum HelperVarType {
     Str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrappleBiasOption {
+    None,
+    Horizontal,
+    Vertical,
+}
+
+impl GrappleBiasOption {
+    fn as_str(self) -> &'static str {
+        match self {
+            GrappleBiasOption::None => "None",
+            GrappleBiasOption::Horizontal => "Horizontal",
+            GrappleBiasOption::Vertical => "Vertical",
+        }
+    }
+
+    fn to_quartz_expr(self) -> &'static str {
+        match self {
+            GrappleBiasOption::None => "SwingBias::None",
+            GrappleBiasOption::Horizontal => "SwingBias::Horizontal",
+            GrappleBiasOption::Vertical => "SwingBias::Vertical",
+        }
+    }
+}
+
 impl HelperVarType {
     fn as_str(self) -> &'static str {
         match self {
@@ -64,6 +103,19 @@ impl HelperVarType {
 enum AssetPreviewTextures {
     Static(egui::TextureHandle),
     Animated(Vec<egui::TextureHandle>),
+}
+
+#[derive(Clone)]
+struct GrapplePreviewConfig {
+    enabled: bool,
+    target_object_id: String,
+    use_anchor_object: bool,
+    anchor_object_id: String,
+    anchor_x: f32,
+    anchor_y: f32,
+    length: f32,
+    stiffness: f32,
+    damping: f32,
 }
 
 pub struct QuartzForgeApp {
@@ -86,6 +138,10 @@ pub struct QuartzForgeApp {
     show_camera_view_window: bool,
     show_camera_view_grid: bool,
     show_pivot_points: bool,
+    show_object_menu_window: bool,
+    show_event_builder_window: bool,
+    show_legacy_update_scripts_window: bool,
+    show_spawn_overlay: bool,
     show_constants_window: bool,
     show_game_state_window: bool,
     show_typed_vars_window: bool,
@@ -101,11 +157,28 @@ pub struct QuartzForgeApp {
     file_browser_editor_text: String,
     file_browser_editor_dirty: bool,
     file_browser_confirm_track_manual: bool,
+    file_browser_cached_root: Option<PathBuf>,
+    file_browser_cached_files: Vec<String>,
     selected_scene_bookmark_id: String,
     new_scene_bookmark_name: String,
     helper_var_name: String,
     helper_var_value: String,
     helper_var_type: HelperVarType,
+    show_grapple_wizard_window: bool,
+    grapple_viz_enabled: bool,
+    grapple_target_object_id: String,
+    grapple_use_anchor_object: bool,
+    grapple_anchor_object_id: String,
+    grapple_anchor_x: f32,
+    grapple_anchor_y: f32,
+    grapple_length: f32,
+    grapple_stiffness: f32,
+    grapple_damping: f32,
+    grapple_max_swing_speed: f32,
+    grapple_auto_shorten: bool,
+    grapple_bias: GrappleBiasOption,
+    preview_refresh_pending: bool,
+    last_preview_refresh_at: Option<Instant>,
 }
 
 impl Default for QuartzForgeApp {
@@ -130,6 +203,10 @@ impl Default for QuartzForgeApp {
             show_camera_view_window: true,
             show_camera_view_grid: true,
             show_pivot_points: false,
+            show_object_menu_window: true,
+            show_event_builder_window: true,
+            show_legacy_update_scripts_window: false,
+            show_spawn_overlay: true,
             show_constants_window: false,
             show_game_state_window: false,
             show_typed_vars_window: false,
@@ -145,11 +222,28 @@ impl Default for QuartzForgeApp {
             file_browser_editor_text: String::new(),
             file_browser_editor_dirty: false,
             file_browser_confirm_track_manual: false,
+            file_browser_cached_root: None,
+            file_browser_cached_files: Vec::new(),
             selected_scene_bookmark_id: "bookmark_home".to_owned(),
             new_scene_bookmark_name: "waypoint".to_owned(),
             helper_var_name: "score".to_owned(),
             helper_var_value: "0".to_owned(),
             helper_var_type: HelperVarType::I32,
+            show_grapple_wizard_window: false,
+            grapple_viz_enabled: true,
+            grapple_target_object_id: "player".to_owned(),
+            grapple_use_anchor_object: false,
+            grapple_anchor_object_id: String::new(),
+            grapple_anchor_x: 900.0,
+            grapple_anchor_y: 300.0,
+            grapple_length: 260.0,
+            grapple_stiffness: 0.8,
+            grapple_damping: 0.05,
+            grapple_max_swing_speed: 0.0,
+            grapple_auto_shorten: false,
+            grapple_bias: GrappleBiasOption::None,
+            preview_refresh_pending: false,
+            last_preview_refresh_at: None,
         }
     }
 }
@@ -428,8 +522,12 @@ impl QuartzForgeApp {
             ui.checkbox(&mut self.undock_scene_canvas, "undock scene canvas window");
             ui.checkbox(&mut self.show_camera_view_window, "show camera view window");
             ui.checkbox(&mut self.show_pivot_points, "show pivot points");
+            ui.checkbox(&mut self.show_spawn_overlay, "show spawn overlay");
         });
         ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.show_object_menu_window, "object menu window");
+            ui.checkbox(&mut self.show_event_builder_window, "event builder window");
+            ui.checkbox(&mut self.show_legacy_update_scripts_window, "legacy update scripts window");
             ui.checkbox(&mut self.show_constants_window, "constants window");
             ui.checkbox(&mut self.show_game_state_window, "game state vars window");
             ui.checkbox(&mut self.show_typed_vars_window, "typed vars window");
@@ -437,6 +535,7 @@ impl QuartzForgeApp {
             ui.checkbox(&mut self.show_update_loops_window, "update loops window");
             ui.checkbox(&mut self.show_top_level_window, "top level window");
             ui.checkbox(&mut self.show_file_browser_window, "file browser window");
+            ui.checkbox(&mut self.show_grapple_wizard_window, "grapple wizard window");
         });
 
         if self.undock_scene_canvas {
@@ -446,18 +545,8 @@ impl QuartzForgeApp {
         }
 
         ui.separator();
-
-        ui.columns(3, |cols| {
-            egui::ScrollArea::vertical().id_salt("objects_editor_scroll").show(&mut cols[0], |ui| {
-                self.objects_editor(ui);
-            });
-            egui::ScrollArea::vertical().id_salt("update_scripts_editor_scroll").show(&mut cols[1], |ui| {
-                self.logic_editor(ui);
-            });
-            egui::ScrollArea::vertical().id_salt("events_editor_scroll").show(&mut cols[2], |ui| {
-                self.events_editor(ui);
-            });
-        });
+        ui.label("Object menu and event builder now run as collapsible floating windows.");
+        ui.label("Use the toggle boxes above to show or hide those windows.");
 
         ui.separator();
         ui.label("Generated Quartz Syntax Preview");
@@ -487,8 +576,51 @@ impl QuartzForgeApp {
             egui::Window::new("Camera View")
                 .resizable(true)
                 .default_size(egui::vec2(560.0, 380.0))
+                .default_height(420.0)
                 .show(ctx, |ui| {
                     self.camera_view_panel(ui);
+                });
+        }
+
+        if self.show_object_menu_window {
+            egui::Window::new("Object Menu")
+                .resizable(true)
+                .collapsible(true)
+                .default_size(egui::vec2(440.0, 620.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("object_menu_window_scroll")
+                        .show(ui, |ui| {
+                            self.objects_editor(ui);
+                        });
+                });
+        }
+
+        if self.show_event_builder_window {
+            egui::Window::new("Event Builder")
+                .resizable(true)
+                .collapsible(true)
+                .default_size(egui::vec2(520.0, 620.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("event_builder_window_scroll")
+                        .show(ui, |ui| {
+                            self.events_editor(ui);
+                        });
+                });
+        }
+
+        if self.show_legacy_update_scripts_window {
+            egui::Window::new("Update Scripts (Legacy)")
+                .resizable(true)
+                .collapsible(true)
+                .default_size(egui::vec2(500.0, 620.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("legacy_update_scripts_window_scroll")
+                        .show(ui, |ui| {
+                            self.logic_editor(ui);
+                        });
                 });
         }
 
@@ -513,6 +645,25 @@ impl QuartzForgeApp {
         if self.show_file_browser_window {
             self.generated_file_browser_window(ctx);
         }
+        if self.show_grapple_wizard_window {
+            self.grapple_wizard_window(ctx);
+        }
+    }
+
+    fn active_scene_has_animated_assets(&self) -> bool {
+        self.project_state
+            .manifest
+            .scenes
+            .get(self.project_state.active_scene_index)
+            .map(|scene| {
+                scene.objects.iter().any(|obj| {
+                    obj.enabled
+                        && (!obj.spawn_only || self.show_spawn_overlay)
+                        && obj.visual_asset_mode == ObjectVisualAssetMode::AnimatedSprite
+                        && !obj.visual_asset_path.trim().is_empty()
+                })
+            })
+            .unwrap_or(false)
     }
 
     fn design_canvas(&mut self, ui: &mut egui::Ui) {
@@ -571,7 +722,7 @@ impl QuartzForgeApp {
             if ui.button("Delete Waypoint").clicked() {
                 self.delete_selected_bookmark();
             }
-            ui.label("Drag objects to move. Drag corner handle to resize. Arrow keys nudge (Shift = x10). Click canvas to focus.");
+            ui.label("Drag objects to move. Use corner nodes to resize and top node to rotate. Arrow keys nudge (Shift = x10). Click canvas to focus.");
         });
 
         let size = egui::vec2(ui.available_width(), ui.available_height().max(380.0));
@@ -581,6 +732,17 @@ impl QuartzForgeApp {
 
         let (project_state, asset_preview_cache) =
             (&mut self.project_state, &mut self.asset_preview_cache);
+        let grapple_preview_cfg = GrapplePreviewConfig {
+            enabled: self.grapple_viz_enabled,
+            target_object_id: self.grapple_target_object_id.clone(),
+            use_anchor_object: self.grapple_use_anchor_object,
+            anchor_object_id: self.grapple_anchor_object_id.clone(),
+            anchor_x: self.grapple_anchor_x,
+            anchor_y: self.grapple_anchor_y,
+            length: self.grapple_length,
+            stiffness: self.grapple_stiffness,
+            damping: self.grapple_damping,
+        };
 
         let Some(scene) = project_state
             .manifest
@@ -593,9 +755,10 @@ impl QuartzForgeApp {
         let mut changed = false;
 
         if response.hovered() {
-            let (scroll_y, pointer_pos, pointer_delta, middle_down, right_down) = ui.input(|i| {
+            let (raw_scroll_y, smooth_scroll_y, pointer_pos, pointer_delta, middle_down, right_down) = ui.input(|i| {
                 (
                     i.raw_scroll_delta.y,
+                    i.smooth_scroll_delta.y,
                     i.pointer.hover_pos(),
                     i.pointer.delta(),
                     i.pointer.middle_down(),
@@ -619,20 +782,30 @@ impl QuartzForgeApp {
                 changed = true;
             }
 
-            if scroll_y.abs() > f32::EPSILON {
+            let scroll_y = if raw_scroll_y.abs() > f32::EPSILON {
+                raw_scroll_y
+            } else {
+                smooth_scroll_y
+            };
+            let has_wheel = raw_scroll_y.abs() > f32::EPSILON || smooth_scroll_y.abs() > f32::EPSILON;
+
+            if has_wheel {
                 let pivot = pointer_pos.unwrap_or(rect.center());
                 let before_z = scene.canvas.zoom.max(0.001);
                 let before_x = ((pivot.x - rect.left()) / before_z) + scene.canvas.pan_x;
                 let before_y = ((pivot.y - rect.top()) / before_z) + scene.canvas.pan_y;
 
-                let factor = (1.0 + scroll_y * 0.0015).clamp(0.25, 4.0);
-                scene.canvas.zoom = (scene.canvas.zoom * factor).clamp(0.1, 5.0);
+                if scroll_y.abs() > f32::EPSILON {
+                    let factor = (1.0 + scroll_y * 0.0015).clamp(0.25, 4.0);
+                    scene.canvas.zoom = (scene.canvas.zoom * factor).clamp(0.1, 5.0);
+                }
 
                 let after_z = scene.canvas.zoom.max(0.001);
                 let after_x = ((pivot.x - rect.left()) / after_z) + scene.canvas.pan_x;
                 let after_y = ((pivot.y - rect.top()) / after_z) + scene.canvas.pan_y;
                 scene.canvas.pan_x += before_x - after_x;
                 scene.canvas.pan_y += before_y - after_y;
+                Self::consume_scroll_wheel(ui);
                 changed = true;
             }
         }
@@ -724,6 +897,10 @@ impl QuartzForgeApp {
             if !obj.enabled {
                 continue;
             }
+            if obj.spawn_only && !self.show_spawn_overlay {
+                continue;
+            }
+            let is_spawn_ghost = obj.spawn_only;
             let draw_x = if obj.advanced.is_camera_space_pinned() {
                 obj.x + scene.canvas.camera_x
             } else {
@@ -737,15 +914,22 @@ impl QuartzForgeApp {
             let p0 = to_screen(draw_x, draw_y);
             let p1 = to_screen(draw_x + obj.w, draw_y + obj.h);
             let obj_rect = Rect::from_two_pos(p0, p1);
+            if !obj_rect.intersects(rect) {
+                continue;
+            }
             let selected = idx == self.selected_object_index;
-            let fill = if selected {
+            let fill = if is_spawn_ghost {
+                Color32::from_rgba_unmultiplied(255, 180, 80, if selected { 72 } else { 42 })
+            } else if selected {
                 Color32::from_rgba_unmultiplied(77, 160, 255, 80)
             } else if obj.advanced.is_camera_space_pinned() {
                 Color32::from_rgba_unmultiplied(120, 210, 255, 60)
             } else {
                 Color32::from_rgba_unmultiplied(obj.color_rgb[0], obj.color_rgb[1], obj.color_rgb[2], 55)
             };
-            let stroke = if selected {
+            let stroke = if is_spawn_ghost {
+                Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 180, 80, 180))
+            } else if selected {
                 Stroke::new(2.0, Color32::from_rgb(77, 160, 255))
             } else if obj.lock_transform {
                 Stroke::new(1.5, Color32::from_rgb(230, 150, 120))
@@ -753,10 +937,17 @@ impl QuartzForgeApp {
                 Stroke::new(1.0, Color32::from_gray(180))
             };
             painter.rect_filled(obj_rect, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 16));
-            painter.rect_stroke(obj_rect, 2.0, stroke);
             match obj.template {
                 ObjectTemplate::Rectangle => {
-                    painter.rect_filled(obj_rect, 2.0, fill);
+                    let rotated = Self::rotated_rect_points(
+                        obj_rect.min,
+                        obj_rect.width(),
+                        obj_rect.height(),
+                        obj.advanced.pivot_x,
+                        obj.advanced.pivot_y,
+                        Self::effective_rotation_deg(obj),
+                    );
+                    painter.add(egui::Shape::convex_polygon(rotated.to_vec(), fill, stroke));
                 }
                 ObjectTemplate::Circle => {
                     let center = obj_rect.center();
@@ -765,6 +956,11 @@ impl QuartzForgeApp {
                     painter.circle_stroke(center, radius, stroke);
                 }
             }
+            let asset_tint = if is_spawn_ghost {
+                Color32::from_rgba_unmultiplied(255, 220, 180, 100)
+            } else {
+                Color32::WHITE
+            };
             let _ = Self::paint_object_asset(
                 &painter,
                 ui.ctx(),
@@ -772,7 +968,17 @@ impl QuartzForgeApp {
                 project_root.as_deref(),
                 obj,
                 obj_rect,
+                asset_tint,
             );
+            if is_spawn_ghost {
+                painter.text(
+                    obj_rect.center_top() + egui::vec2(0.0, 4.0),
+                    egui::Align2::CENTER_TOP,
+                    "spawn",
+                    egui::FontId::monospace(10.0),
+                    Color32::from_rgba_unmultiplied(255, 200, 120, 220),
+                );
+            }
             if self.show_pivot_points {
                 let pivot_world_x = draw_x + obj.w * obj.advanced.pivot_x;
                 let pivot_world_y = draw_y + obj.h * obj.advanced.pivot_y;
@@ -794,11 +1000,22 @@ impl QuartzForgeApp {
                     pivot_stroke,
                 );
             }
-            if !obj.lock_transform {
-                let handle = Rect::from_center_size(obj_rect.right_bottom(), egui::vec2(8.0, 8.0));
-                painter.rect_filled(handle, 1.0, Color32::from_rgb(250, 230, 120));
+            if !obj.lock_transform && selected {
+                let node_size = egui::vec2(9.0, 9.0);
+                for corner in [obj_rect.left_top(), obj_rect.right_top(), obj_rect.left_bottom(), obj_rect.right_bottom()] {
+                    let handle = Rect::from_center_size(corner, node_size);
+                    painter.rect_filled(handle, 1.5, Color32::from_rgb(250, 230, 120));
+                }
+                let rotate_handle_center = Pos2::new(obj_rect.center().x, obj_rect.top() - 22.0);
+                painter.circle_filled(rotate_handle_center, 5.0, Color32::from_rgb(240, 180, 255));
+                painter.line_segment(
+                    [Pos2::new(obj_rect.center().x, obj_rect.top()), rotate_handle_center],
+                    Stroke::new(1.0, Color32::from_rgb(200, 160, 255)),
+                );
             }
         }
+
+        Self::paint_grapple_preview_scene(&painter, rect, scene, &to_screen, &grapple_preview_cfg);
 
         if response.clicked() {
             self.canvas_has_focus = true;
@@ -839,11 +1056,11 @@ impl QuartzForgeApp {
             }
         }
 
-        // Begin drag selection/resizing
+        // Begin drag selection/resize/rotate
         if response.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
             if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
                 let mut hit_index: Option<usize> = None;
-                let mut resizing = false;
+                let mut drag_mode = CanvasDragMode::Move;
 
                 for idx in draw_order.iter().copied().rev() {
                     let obj = &scene.objects[idx];
@@ -863,15 +1080,41 @@ impl QuartzForgeApp {
                     let p0 = to_screen(draw_x, draw_y);
                     let p1 = to_screen(draw_x + obj.w, draw_y + obj.h);
                     let obj_rect = Rect::from_two_pos(p0, p1);
-                    let handle = Rect::from_center_size(obj_rect.right_bottom(), egui::vec2(10.0, 10.0));
-                    if !obj.lock_transform && handle.contains(pointer) {
+                    let top_left = Rect::from_center_size(obj_rect.left_top(), egui::vec2(12.0, 12.0));
+                    let top_right = Rect::from_center_size(obj_rect.right_top(), egui::vec2(12.0, 12.0));
+                    let bottom_left = Rect::from_center_size(obj_rect.left_bottom(), egui::vec2(12.0, 12.0));
+                    let bottom_right = Rect::from_center_size(obj_rect.right_bottom(), egui::vec2(12.0, 12.0));
+                    let rotate_handle_center = Pos2::new(obj_rect.center().x, obj_rect.top() - 22.0);
+                    let rotate_handle = Rect::from_center_size(rotate_handle_center, egui::vec2(14.0, 14.0));
+
+                    if !obj.lock_transform && rotate_handle.contains(pointer) {
                         hit_index = Some(idx);
-                        resizing = true;
+                        drag_mode = CanvasDragMode::Rotate;
+                        break;
+                    }
+                    if !obj.lock_transform && top_left.contains(pointer) {
+                        hit_index = Some(idx);
+                        drag_mode = CanvasDragMode::ResizeTopLeft;
+                        break;
+                    }
+                    if !obj.lock_transform && top_right.contains(pointer) {
+                        hit_index = Some(idx);
+                        drag_mode = CanvasDragMode::ResizeTopRight;
+                        break;
+                    }
+                    if !obj.lock_transform && bottom_left.contains(pointer) {
+                        hit_index = Some(idx);
+                        drag_mode = CanvasDragMode::ResizeBottomLeft;
+                        break;
+                    }
+                    if !obj.lock_transform && bottom_right.contains(pointer) {
+                        hit_index = Some(idx);
+                        drag_mode = CanvasDragMode::ResizeBottomRight;
                         break;
                     }
                     if !obj.lock_transform && obj_rect.contains(pointer) {
                         hit_index = Some(idx);
-                        resizing = false;
+                        drag_mode = CanvasDragMode::Move;
                         break;
                     }
                 }
@@ -888,12 +1131,17 @@ impl QuartzForgeApp {
                             start_y: obj.y,
                             start_w: obj.w,
                             start_h: obj.h,
-                            resizing,
+                            start_rotation_deg: obj.advanced.rotation_deg,
+                            pivot_world_x: obj.x + obj.w * obj.advanced.pivot_x,
+                            pivot_world_y: obj.y + obj.h * obj.advanced.pivot_y,
+                            mode: drag_mode,
                         });
                     }
                 }
             }
         }
+
+        let was_dragging = self.canvas_drag.is_some();
 
         // Continue drag
         if let Some(drag) = self.canvas_drag {
@@ -904,22 +1152,71 @@ impl QuartzForgeApp {
                     let dy = cvy - drag.start_vy;
                     if drag.object_index < scene.objects.len() {
                         let obj = &mut scene.objects[drag.object_index];
-                        if drag.resizing {
-                            obj.w = (drag.start_w + dx).max(2.0);
-                            obj.h = (drag.start_h + dy).max(2.0);
-                            if scene.canvas.snap_to_grid {
-                                obj.w = Self::snap_value(obj.w, self.grid_size).max(2.0);
-                                obj.h = Self::snap_value(obj.h, self.grid_size).max(2.0);
+                        match drag.mode {
+                            CanvasDragMode::Move => {
+                                obj.x = drag.start_x + dx;
+                                obj.y = drag.start_y + dy;
                             }
-                        } else {
-                            obj.x = drag.start_x + dx;
-                            obj.y = drag.start_y + dy;
-                            Self::apply_background_snap_if_needed(obj, &scene.canvas);
-                            if scene.canvas.snap_to_grid {
-                                obj.x = Self::snap_value(obj.x, self.grid_size);
-                                obj.y = Self::snap_value(obj.y, self.grid_size);
+                            CanvasDragMode::ResizeBottomRight => {
+                                obj.w = (drag.start_w + dx).max(2.0);
+                                obj.h = (drag.start_h + dy).max(2.0);
+                            }
+                            CanvasDragMode::ResizeTopLeft => {
+                                obj.x = drag.start_x + dx;
+                                obj.y = drag.start_y + dy;
+                                obj.w = (drag.start_w - dx).max(2.0);
+                                obj.h = (drag.start_h - dy).max(2.0);
+                            }
+                            CanvasDragMode::ResizeTopRight => {
+                                obj.y = drag.start_y + dy;
+                                obj.w = (drag.start_w + dx).max(2.0);
+                                obj.h = (drag.start_h - dy).max(2.0);
+                            }
+                            CanvasDragMode::ResizeBottomLeft => {
+                                obj.x = drag.start_x + dx;
+                                obj.w = (drag.start_w - dx).max(2.0);
+                                obj.h = (drag.start_h + dy).max(2.0);
+                            }
+                            CanvasDragMode::Rotate => {
+                                let start_angle = (drag.start_vy - drag.pivot_world_y)
+                                    .atan2(drag.start_vx - drag.pivot_world_x);
+                                let current_angle = (cvy - drag.pivot_world_y)
+                                    .atan2(cvx - drag.pivot_world_x);
+                                let delta_deg = (current_angle - start_angle).to_degrees();
+                                obj.advanced.rotation_deg = drag.start_rotation_deg + delta_deg;
                             }
                         }
+
+                        if scene.canvas.snap_to_grid {
+                            match drag.mode {
+                                CanvasDragMode::Move
+                                | CanvasDragMode::ResizeTopLeft
+                                | CanvasDragMode::ResizeBottomLeft => {
+                                    obj.x = Self::snap_value(obj.x, self.grid_size);
+                                }
+                                _ => {}
+                            }
+                            match drag.mode {
+                                CanvasDragMode::Move
+                                | CanvasDragMode::ResizeTopLeft
+                                | CanvasDragMode::ResizeTopRight => {
+                                    obj.y = Self::snap_value(obj.y, self.grid_size);
+                                }
+                                _ => {}
+                            }
+                            match drag.mode {
+                                CanvasDragMode::ResizeTopLeft
+                                | CanvasDragMode::ResizeTopRight
+                                | CanvasDragMode::ResizeBottomLeft
+                                | CanvasDragMode::ResizeBottomRight => {
+                                    obj.w = Self::snap_value(obj.w, self.grid_size).max(2.0);
+                                    obj.h = Self::snap_value(obj.h, self.grid_size).max(2.0);
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        Self::apply_background_snap_if_needed(obj, &scene.canvas);
                         changed = true;
                     }
                 }
@@ -928,13 +1225,28 @@ impl QuartzForgeApp {
             }
         }
 
+        let drag_ended = was_dragging && self.canvas_drag.is_none();
         if changed {
+            self.project_state.dirty = true;
+        }
+        if drag_ended {
             self.touch_and_refresh_preview();
         }
     }
 
     fn camera_view_panel(&mut self, ui: &mut egui::Ui) {
         let project_root = self.project_root.clone();
+        let grapple_preview_cfg = GrapplePreviewConfig {
+            enabled: self.grapple_viz_enabled,
+            target_object_id: self.grapple_target_object_id.clone(),
+            use_anchor_object: self.grapple_use_anchor_object,
+            anchor_object_id: self.grapple_anchor_object_id.clone(),
+            anchor_x: self.grapple_anchor_x,
+            anchor_y: self.grapple_anchor_y,
+            length: self.grapple_length,
+            stiffness: self.grapple_stiffness,
+            damping: self.grapple_damping,
+        };
         let (project_state, asset_preview_cache) =
             (&mut self.project_state, &mut self.asset_preview_cache);
         let Some(scene) = project_state
@@ -955,10 +1267,18 @@ impl QuartzForgeApp {
             ui.label("Drag objects inside the camera frame to reposition them.");
         });
 
-        let size = egui::vec2(ui.available_width(), ui.available_height().max(300.0));
+        let aspect = view_w / view_h;
+        let target_h = (ui.available_width() / aspect).clamp(220.0, 460.0);
+        let size = egui::vec2(ui.available_width(), target_h);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 20, 24));
+        if response.hovered() {
+            let (raw_scroll_y, smooth_scroll_y) = ui.input(|i| (i.raw_scroll_delta.y, i.smooth_scroll_delta.y));
+            if raw_scroll_y.abs() > f32::EPSILON || smooth_scroll_y.abs() > f32::EPSILON {
+                Self::consume_scroll_wheel(ui);
+            }
+        }
 
         let scale = (rect.width() / view_w).min(rect.height() / view_h).max(0.0001);
         let draw_w = view_w * scale;
@@ -1007,6 +1327,10 @@ impl QuartzForgeApp {
             if !obj.enabled {
                 continue;
             }
+            if obj.spawn_only && !self.show_spawn_overlay {
+                continue;
+            }
+            let is_spawn_ghost = obj.spawn_only;
             let rel_x = if obj.advanced.is_camera_space_pinned() { obj.x } else { obj.x - scene.canvas.camera_x };
             let rel_y = if obj.advanced.is_camera_space_pinned() { obj.y } else { obj.y - scene.canvas.camera_y };
             let p0 = Pos2::new(view_rect.left() + rel_x * scale, view_rect.top() + rel_y * scale);
@@ -1015,16 +1339,32 @@ impl QuartzForgeApp {
                 view_rect.top() + (rel_y + obj.h) * scale,
             );
             let obj_rect = Rect::from_two_pos(p0, p1);
-            let fill = if obj.advanced.is_camera_space_pinned() {
+            if !obj_rect.intersects(view_rect) {
+                continue;
+            }
+            let fill = if is_spawn_ghost {
+                Color32::from_rgba_unmultiplied(255, 180, 80, 54)
+            } else if obj.advanced.is_camera_space_pinned() {
                 Color32::from_rgba_unmultiplied(100, 220, 255, 85)
             } else {
                 Color32::from_rgba_unmultiplied(obj.color_rgb[0], obj.color_rgb[1], obj.color_rgb[2], 85)
             };
-            let stroke = Stroke::new(1.0, Color32::from_gray(230));
+            let stroke = if is_spawn_ghost {
+                Stroke::new(1.25, Color32::from_rgba_unmultiplied(255, 180, 80, 200))
+            } else {
+                Stroke::new(1.0, Color32::from_gray(230))
+            };
             match obj.template {
                 ObjectTemplate::Rectangle => {
-                    painter.rect_filled(obj_rect, 1.5, fill);
-                    painter.rect_stroke(obj_rect, 1.5, stroke);
+                    let rotated = Self::rotated_rect_points(
+                        obj_rect.min,
+                        obj_rect.width(),
+                        obj_rect.height(),
+                        obj.advanced.pivot_x,
+                        obj.advanced.pivot_y,
+                        Self::effective_rotation_deg(obj),
+                    );
+                    painter.add(egui::Shape::convex_polygon(rotated.to_vec(), fill, stroke));
                 }
                 ObjectTemplate::Circle => {
                     let center = obj_rect.center();
@@ -1033,6 +1373,11 @@ impl QuartzForgeApp {
                     painter.circle_stroke(center, radius, stroke);
                 }
             }
+            let asset_tint = if is_spawn_ghost {
+                Color32::from_rgba_unmultiplied(255, 220, 180, 100)
+            } else {
+                Color32::WHITE
+            };
             let _ = Self::paint_object_asset(
                 &painter,
                 ui.ctx(),
@@ -1040,7 +1385,17 @@ impl QuartzForgeApp {
                 project_root.as_deref(),
                 obj,
                 obj_rect,
+                asset_tint,
             );
+            if is_spawn_ghost {
+                painter.text(
+                    obj_rect.center_top() + egui::vec2(0.0, 3.0),
+                    egui::Align2::CENTER_TOP,
+                    "spawn",
+                    egui::FontId::monospace(9.0),
+                    Color32::from_rgba_unmultiplied(255, 200, 120, 220),
+                );
+            }
             if self.show_pivot_points {
                 let pivot_rel_x = rel_x + obj.w * obj.advanced.pivot_x;
                 let pivot_rel_y = rel_y + obj.h * obj.advanced.pivot_y;
@@ -1066,6 +1421,8 @@ impl QuartzForgeApp {
                 );
             }
         }
+
+        Self::paint_grapple_preview_camera(&painter, scene, view_rect, scale, &grapple_preview_cfg);
 
         if response.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
             if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
@@ -1105,6 +1462,8 @@ impl QuartzForgeApp {
             }
         }
 
+        let was_camera_dragging = self.camera_view_drag.is_some();
+
         if let Some(drag) = self.camera_view_drag {
             if ui.input(|i| i.pointer.primary_down()) {
                 if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
@@ -1127,7 +1486,11 @@ impl QuartzForgeApp {
 
         ui.label("Camera view: cyan objects are camera-anchored (screen-space). Others are world-space.");
 
+        let camera_drag_ended = was_camera_dragging && self.camera_view_drag.is_none();
         if changed {
+            self.project_state.dirty = true;
+        }
+        if camera_drag_ended {
             self.touch_and_refresh_preview();
         }
     }
@@ -1135,6 +1498,57 @@ impl QuartzForgeApp {
     fn snap_value(value: f32, grid: f32) -> f32 {
         let step = grid.max(1.0);
         (value / step).round() * step
+    }
+
+    fn consume_scroll_wheel(ui: &egui::Ui) {
+        ui.ctx().input_mut(|i| {
+            i.raw_scroll_delta = egui::Vec2::ZERO;
+            i.smooth_scroll_delta = egui::Vec2::ZERO;
+        });
+    }
+
+    fn effective_rotation_deg(object: &crate::core::quartz_domain::QuartzObjectBlueprint) -> f32 {
+        if object.advanced.slope_enabled
+            && object.advanced.slope_auto_rotation
+            && object.w.abs() > f32::EPSILON
+        {
+            (object.advanced.slope_right_offset - object.advanced.slope_left_offset)
+                .atan2(object.w)
+                .to_degrees()
+        } else {
+            object.advanced.rotation_deg
+        }
+    }
+
+    fn rotated_rect_points(
+        top_left: Pos2,
+        width: f32,
+        height: f32,
+        pivot_x: f32,
+        pivot_y: f32,
+        rotation_deg: f32,
+    ) -> [Pos2; 4] {
+        let pivot = Pos2::new(top_left.x + width * pivot_x, top_left.y + height * pivot_y);
+        let angle = rotation_deg.to_radians();
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let corners = [
+            Pos2::new(top_left.x, top_left.y),
+            Pos2::new(top_left.x + width, top_left.y),
+            Pos2::new(top_left.x + width, top_left.y + height),
+            Pos2::new(top_left.x, top_left.y + height),
+        ];
+
+        let mut rotated = [Pos2::ZERO; 4];
+        for (idx, corner) in corners.iter().enumerate() {
+            let dx = corner.x - pivot.x;
+            let dy = corner.y - pivot.y;
+            rotated[idx] = Pos2::new(
+                pivot.x + (dx * cos_a - dy * sin_a),
+                pivot.y + (dx * sin_a + dy * cos_a),
+            );
+        }
+        rotated
     }
 
     fn ensure_home_view_bookmark(scene: &mut SceneDocument) {
@@ -1240,6 +1654,275 @@ impl QuartzForgeApp {
             object.x = Self::snap_to_background_cell(object.x, cell_w);
             object.y = Self::snap_to_background_cell(object.y, cell_h);
         }
+    }
+
+    fn resolve_anchor_world(
+        scene: &crate::core::project::SceneDocument,
+        cfg: &GrapplePreviewConfig,
+    ) -> Option<(f32, f32)> {
+        if cfg.use_anchor_object {
+            let anchor = scene
+                .objects
+                .iter()
+                .find(|o| o.id == cfg.anchor_object_id)?;
+            Some((anchor.x + anchor.w * 0.5, anchor.y + anchor.h * 0.5))
+        } else {
+            Some((cfg.anchor_x, cfg.anchor_y))
+        }
+    }
+
+    fn paint_grapple_preview_scene(
+        painter: &egui::Painter,
+        rect: Rect,
+        scene: &crate::core::project::SceneDocument,
+        to_screen: &dyn Fn(f32, f32) -> Pos2,
+        cfg: &GrapplePreviewConfig,
+    ) {
+        if !cfg.enabled {
+            return;
+        }
+        let Some(target) = scene
+            .objects
+            .iter()
+            .find(|o| o.id == cfg.target_object_id)
+        else {
+            return;
+        };
+        let Some((anchor_x, anchor_y)) = Self::resolve_anchor_world(scene, cfg) else {
+            return;
+        };
+
+        let target_center = if target.advanced.is_camera_space_pinned() {
+            (
+                target.x + scene.canvas.camera_x + target.w * 0.5,
+                target.y + scene.canvas.camera_y + target.h * 0.5,
+            )
+        } else {
+            (target.x + target.w * 0.5, target.y + target.h * 0.5)
+        };
+        let anchor_screen = to_screen(anchor_x, anchor_y);
+        let target_screen = to_screen(target_center.0, target_center.1);
+        let radius_screen = cfg.length * scene.canvas.zoom.max(0.001);
+
+        painter.circle_stroke(
+            anchor_screen,
+            radius_screen.max(4.0),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(180, 230, 255, 80)),
+        );
+        painter.line_segment(
+            [anchor_screen, target_screen],
+            Stroke::new(2.0, Color32::from_rgb(110, 220, 255)),
+        );
+        painter.circle_filled(anchor_screen, 4.0, Color32::from_rgb(255, 220, 110));
+        painter.circle_stroke(target_screen, 5.0, Stroke::new(1.5, Color32::from_rgb(110, 220, 255)));
+        painter.text(
+            Pos2::new(rect.left() + 8.0, rect.top() + 8.0),
+            Align2::LEFT_TOP,
+            format!(
+                "Grapple: {} | L {:.1} | k {:.2} | d {:.2}",
+                cfg.target_object_id,
+                cfg.length,
+                cfg.stiffness,
+                cfg.damping
+            ),
+            egui::FontId::monospace(11.0),
+            Color32::from_rgb(170, 230, 255),
+        );
+    }
+
+    fn paint_grapple_preview_camera(
+        painter: &egui::Painter,
+        scene: &crate::core::project::SceneDocument,
+        view_rect: Rect,
+        scale: f32,
+        cfg: &GrapplePreviewConfig,
+    ) {
+        if !cfg.enabled {
+            return;
+        }
+        let Some(target) = scene
+            .objects
+            .iter()
+            .find(|o| o.id == cfg.target_object_id)
+        else {
+            return;
+        };
+        let Some((anchor_x, anchor_y)) = Self::resolve_anchor_world(scene, cfg) else {
+            return;
+        };
+
+        let target_world = if target.advanced.is_camera_space_pinned() {
+            (target.x + target.w * 0.5, target.y + target.h * 0.5)
+        } else {
+            (
+                target.x + target.w * 0.5 - scene.canvas.camera_x,
+                target.y + target.h * 0.5 - scene.canvas.camera_y,
+            )
+        };
+        let anchor_world = (anchor_x - scene.canvas.camera_x, anchor_y - scene.canvas.camera_y);
+        let anchor_screen = Pos2::new(
+            view_rect.left() + anchor_world.0 * scale,
+            view_rect.top() + anchor_world.1 * scale,
+        );
+        let target_screen = Pos2::new(
+            view_rect.left() + target_world.0 * scale,
+            view_rect.top() + target_world.1 * scale,
+        );
+        painter.line_segment(
+            [anchor_screen, target_screen],
+            Stroke::new(2.0, Color32::from_rgb(110, 220, 255)),
+        );
+        painter.circle_filled(anchor_screen, 3.0, Color32::from_rgb(255, 220, 110));
+        painter.circle_stroke(target_screen, 4.0, Stroke::new(1.25, Color32::from_rgb(110, 220, 255)));
+    }
+
+    fn build_grapple_attach_snippet(&self) -> String {
+        let mut chain = String::new();
+        if self.grapple_use_anchor_object && !self.grapple_anchor_object_id.trim().is_empty() {
+            chain.push_str(&format!(
+                "GrappleConstraint::to_object(\"{}\", {})",
+                self.grapple_anchor_object_id.trim(),
+                self.grapple_length
+            ));
+        } else {
+            chain.push_str(&format!(
+                "GrappleConstraint::at_point(({}, {}), {})",
+                self.grapple_anchor_x,
+                self.grapple_anchor_y,
+                self.grapple_length
+            ));
+        }
+        chain.push_str(&format!(".with_stiffness({})", self.grapple_stiffness));
+        chain.push_str(&format!(".with_damping({})", self.grapple_damping));
+        if self.grapple_max_swing_speed > 0.0 {
+            chain.push_str(&format!(".with_max_swing_speed({})", self.grapple_max_swing_speed));
+        }
+        if self.grapple_auto_shorten {
+            chain.push_str(".with_auto_shorten()");
+        }
+        if self.grapple_bias != GrappleBiasOption::None {
+            chain.push_str(&format!(".with_swing_bias({})", self.grapple_bias.to_quartz_expr()));
+        }
+
+        format!(
+            "canvas.run(Action::PluginCall {{\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {{\n        target: Target::name(\"{}\"),\n        grapple: {},\n    }}),\n}});",
+            self.grapple_target_object_id.trim(),
+            chain
+        )
+    }
+
+    fn insert_snippet_into_best_custom_block(&mut self, snippet: &str) {
+        let Some(scene) = self
+            .project_state
+            .manifest
+            .scenes
+            .get_mut(self.project_state.active_scene_index)
+        else {
+            return;
+        };
+
+        let mut target_idx = scene
+            .custom_code_blocks
+            .iter()
+            .position(|b| b.id == self.selected_custom_code_id);
+        if target_idx.is_none() {
+            target_idx = scene
+                .custom_code_blocks
+                .iter()
+                .position(|b| {
+                    matches!(
+                        b.kind,
+                        CustomCodeKind::UpdateLoops
+                            | CustomCodeKind::CustomEvents
+                            | CustomCodeKind::TopLevel
+                    )
+                });
+        }
+        if target_idx.is_none() {
+            scene
+                .custom_code_blocks
+                .push(crate::core::quartz_domain::CustomCodeBlock::new(
+                    "custom_update_0".to_owned(),
+                    "custom_update_0".to_owned(),
+                    CustomCodeKind::UpdateLoops,
+                    String::new(),
+                ));
+            target_idx = scene.custom_code_blocks.len().checked_sub(1);
+        }
+
+        if let Some(idx) = target_idx {
+            let block = &mut scene.custom_code_blocks[idx];
+            Self::append_code_block(&mut block.code, snippet);
+            self.selected_custom_code_id = block.id.clone();
+            self.project_state.dirty = true;
+            self.quartz_preview = self.build_scene_source();
+        }
+    }
+
+    fn plugin_install_hint_comment(plugin_name: &str) -> String {
+        format!(
+            "// git clone https://github.com/Artistsyn/{}.git from within the quartz/src/plugin directory to install this plugin if you have not already",
+            plugin_name
+        )
+    }
+
+    fn ensure_plugin_imports_guard(
+        &mut self,
+        plugin_name: &str,
+        use_lines: &[&str],
+    ) {
+        let active_scene = self.project_state.active_scene_index;
+        let needs_top_level = self
+            .project_state
+            .manifest
+            .scenes
+            .get(active_scene)
+            .map(|scene| {
+                !scene
+                    .custom_code_blocks
+                    .iter()
+                    .any(|b| b.kind == CustomCodeKind::TopLevel)
+            })
+            .unwrap_or(false);
+        if needs_top_level {
+            self.project_state
+                .add_custom_code_block_to_active_scene(CustomCodeKind::TopLevel);
+        }
+
+        let Some(scene) = self
+            .project_state
+            .manifest
+            .scenes
+            .get_mut(active_scene)
+        else {
+            return;
+        };
+
+        let Some(top_level) = scene
+            .custom_code_blocks
+            .iter_mut()
+            .find(|b| b.kind == CustomCodeKind::TopLevel)
+        else {
+            return;
+        };
+
+        let install_hint = Self::plugin_install_hint_comment(plugin_name);
+        if !top_level.code.contains(&install_hint) {
+            if !top_level.code.trim().is_empty() {
+                top_level.code.push('\n');
+            }
+            top_level.code.push_str(&install_hint);
+            top_level.code.push('\n');
+        }
+
+        for use_line in use_lines {
+            if !top_level.code.contains(use_line) {
+                top_level.code.push_str(use_line);
+                top_level.code.push('\n');
+            }
+        }
+
+        self.project_state.dirty = true;
     }
 
     fn quartz_value_expr(var_type: HelperVarType, raw_value: &str) -> String {
@@ -1500,6 +2183,7 @@ impl QuartzForgeApp {
         project_root: Option<&Path>,
         object: &crate::core::quartz_domain::QuartzObjectBlueprint,
         rect: Rect,
+        tint: Color32,
     ) -> bool {
         if object.visual_asset_mode == ObjectVisualAssetMode::None {
             return false;
@@ -1550,7 +2234,7 @@ impl QuartzForgeApp {
             texture_id,
             rect,
             Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
+            tint,
         );
         true
     }
@@ -1700,9 +2384,23 @@ impl QuartzForgeApp {
             }
         }
 
+        for object in &scene.objects {
+            if !object.enabled || !object.spawn_only {
+                continue;
+            }
+            let target = Self::component_target_path(scene_source_file, &object.output_file);
+            if target == scene_source_file {
+                out.push_str(&codegen::object_function_source(object));
+                out.push('\n');
+            }
+        }
+
         out.push_str("pub fn setup_scene(canvas: &mut Canvas) {\n");
         for object in &scene.objects {
             if !object.enabled {
+                continue;
+            }
+            if object.spawn_only {
                 continue;
             }
             let target = Self::component_target_path(scene_source_file, &object.output_file);
@@ -1982,6 +2680,10 @@ impl QuartzForgeApp {
                 let mut helper_var_name = self.helper_var_name.clone();
                 let mut helper_var_value = self.helper_var_value.clone();
                 let mut helper_var_type = self.helper_var_type;
+                let mut ensure_terrain_guard = false;
+                let mut ensure_grapple_guard = false;
+                let mut ensure_save_game_guard = false;
+                let mut ensure_background_guard = false;
                 let selected_id = self.selected_custom_code_id.clone();
                 let Some(scene) = self
                     .project_state
@@ -2178,19 +2880,70 @@ impl QuartzForgeApp {
 
                     ui.collapsing("7) Plugin Integration", |ui| {
                         if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents | CustomCodeKind::TopLevel) {
-                            for (idx, snippet) in [
-                                "canvas.run(Action::run_plugin(\"save_game\", \"save_slot:slot1\"));",
-                                "canvas.run(Action::PluginCall {\n    name: \"terrain_collision\".to_owned(),\n    payload: std::sync::Arc::new(\"typed_payload\".to_owned()),\n});",
-                                "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    // plugin.register_terrain(name, bytes, (w,h), (obj_w,obj_h), threshold, rdp);\n}",
-                            ]
-                            .into_iter()
-                            .enumerate()
-                            {
-                                if ui.button(format!("insert {}", idx + 1)).clicked() {
+                            ui.label("Terrain Collision Plugin");
+                            for snippet in [
+                                "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.register_terrain(\n        \"ground\",\n        include_bytes!(\"../../assets/ground.rgba\"),\n        (64, 64),\n        (64.0, 64.0),\n        128,\n        4.0,\n    );\n}",
+                                "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.register_group_member(\n        \"floor\",\n        \"floor_tile_0\",\n        include_bytes!(\"../../assets/floor_tile.rgba\"),\n        (32, 32),\n        (32.0, 32.0),\n        128,\n        4.0,\n    );\n}",
+                                "canvas.run(Action::PluginCall {\n    name: \"terrain_collision\".to_owned(),\n    payload: std::sync::Arc::new(TerrainCollisionCall::EnsureDynamicOutlineForImage {\n        name: \"player\".to_owned(),\n        rgba_bytes: frame_rgba_bytes.clone(),\n        sprite_dims: (32, 48),\n        object_size: (32.0, 48.0),\n        threshold: 1,\n        rdp_epsilon: 2.0,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"terrain_collision\".to_owned(),\n    payload: std::sync::Arc::new(TerrainCollisionCall::UnregisterDynamicOutline {\n        name: \"player\".to_owned(),\n    }),\n});",
+                                "canvas.run(Action::run_plugin(\"terrain_collision\", \"remove_group:floor\"));",
+                                "canvas.run(Action::run_plugin(\"terrain_collision\", \"rebuild:floor\"));",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    ensure_terrain_guard = true;
                                     Self::append_code_block(&mut block.code, snippet);
                                     changed = true;
                                 }
-                                ui.label(snippet);
+                            }
+
+                            ui.separator();
+                            ui.label("Grapple Plugin");
+                            for snippet in [
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::grappling_hook((anchor_x, anchor_y), 260.0),\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetLength {\n        target: Target::name(\"player\"),\n        value: 220.0,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetAnchorObject {\n        target: Target::name(\"player\"),\n        anchor_object: \"hook_1\".to_owned(),\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetSwingBias {\n        target: Target::name(\"player\"),\n        bias: SwingBias::Horizontal,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Release {\n        target: Target::name(\"player\"),\n    }),\n});",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    ensure_grapple_guard = true;
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+
+                            ui.separator();
+                            ui.label("SaveGame Plugin");
+                            for snippet in [
+                                "if !matches!(canvas.get_var(\"save_game_registered\"), Some(Value::Bool(true))) {\n    canvas.add_plugin(SaveGamePlugin::default());\n    canvas.set_var(\"save_game_registered\", Value::Bool(true));\n}",
+                                "canvas.run(Action::run_plugin(\"save_game\", \"save_slot:slot1\"));",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    ensure_save_game_guard = true;
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+
+                            ui.separator();
+                            ui.label("Background Plugin");
+                            for snippet in [
+                                "if !matches!(canvas.get_var(\"background_plugin_registered\"), Some(Value::Bool(true))) {\n    canvas.add_plugin(BackgroundPlugin::new());\n    canvas.set_var(\"background_plugin_registered\", Value::Bool(true));\n}",
+                                "canvas.run(Action::run_plugin(\"background\", \"show:main_bg\"));",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    ensure_background_guard = true;
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+
+                            ui.separator();
+                            let generic = "canvas.run(Action::run_plugin(\"save_game\", \"save_slot:slot1\"));";
+                            if ui.button(generic).clicked() {
+                                ensure_save_game_guard = true;
+                                Self::append_code_block(&mut block.code, generic);
+                                changed = true;
                             }
                         }
                     });
@@ -2211,7 +2964,58 @@ impl QuartzForgeApp {
                         }
                     });
 
-                    ui.collapsing("9) Constants Templates", |ui| {
+                    ui.collapsing("9) Caches & Pools", |ui| {
+                        if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents | CustomCodeKind::TopLevel) {
+                            for snippet in [
+                                "let bullet_template = GameObject::build(\"bullet_tpl\").size(24.0, 24.0).build(canvas);\ncanvas.create_pool(\"bullet_pool\", bullet_template, 32);",
+                                "if let Some(name) = canvas.pool_acquire(\"bullet_pool\", (player_x, player_y)) {\n    // configure the pooled object if needed\n}",
+                                "canvas.pool_release(\"bullet_17\");\ncanvas.pool_release_all(\"bullet_pool\");",
+                                "let available = canvas.pool_available(\"bullet_pool\");\nlet active = canvas.pool_active(\"bullet_pool\");",
+                                "let cached = canvas.load_image_cached(\"assets/sprites/player.png\");",
+                                "let cached_sized = canvas.load_image_sized_cached(\"assets/sprites/tile.png\", 128.0, 128.0);",
+                                "let procedural = canvas.get_or_create_image(\"noise_bg\", || {\n    // build and return an Image here\n    canvas.load_image_cached(\"assets/sprites/fallback.png\")\n});",
+                                "canvas.clear_image_cache();",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                    ui.collapsing("10) Text & UI", |ui| {
+                        if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents | CustomCodeKind::TopLevel) {
+                            for snippet in [
+                                "static HUD_FONT: std::sync::OnceLock<Font> = std::sync::OnceLock::new();\nlet font = std::sync::Arc::new(\n    HUD_FONT\n        .get_or_init(|| Font::from_bytes(include_bytes!(\"../../assets/font.ttf\")).expect(\"hud font\"))\n        .clone(),\n);\nlet hud_text = Text::new(\n    vec![Span::new(\"Ready\".to_owned(), 30.0, Some(37.5), font, Color(255, 255, 255, 255), 0.0)],\n    None,\n    Align::Left,\n    None,\n);\ncanvas.run(Action::set_text(Target::name(\"hud_label\"), hud_text));",
+                                "static STATUS_FONT: std::sync::OnceLock<Font> = std::sync::OnceLock::new();\nlet font = std::sync::Arc::new(\n    STATUS_FONT\n        .get_or_init(|| Font::from_bytes(include_bytes!(\"../../assets/font.ttf\")).expect(\"status font\"))\n        .clone(),\n);\nlet status_text = Text::new(\n    vec![\n        Span::new(\"HP: \".to_owned(), 22.0, Some(27.5), font.clone(), Color(255, 230, 120, 255), 0.0),\n        Span::new(\"100\".to_owned(), 22.0, Some(27.5), font, Color(255, 255, 255, 255), 0.0),\n    ],\n    None,\n    Align::Left,\n    None,\n);\ncanvas.run(Action::set_text(Target::name(\"hud_status\"), status_text));",
+                                "// Build the Text first, then swap the drawable on the object.\nstatic SCORE_FONT: std::sync::OnceLock<Font> = std::sync::OnceLock::new();\nlet font = std::sync::Arc::new(\n    SCORE_FONT\n        .get_or_init(|| Font::from_bytes(include_bytes!(\"../../assets/font.ttf\")).expect(\"score font\"))\n        .clone(),\n);\nlet score_text = Text::new(\n    vec![Span::new(\"Score: 0\".to_owned(), 28.0, Some(35.0), font, Color(210, 255, 210, 255), 0.0)],\n    None,\n    Align::Left,\n    None,\n);\nif let Some(obj) = canvas.get_game_object_mut(\"score_label\") {\n    obj.set_drawable(Box::new(score_text));\n}",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                    ui.collapsing("11) Sound", |ui| {
+                        if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents | CustomCodeKind::TopLevel) {
+                            for snippet in [
+                                "canvas.play_sound(\"assets/audio/click.ogg\");",
+                                "canvas.play_sound_with(\"assets/audio/coin.ogg\", SoundOptions::new().volume(0.25));",
+                                "canvas.run(Action::play_sound(\"assets/audio/whoosh.ogg\"));",
+                                "canvas.run(Action::play_sound_with_options(\"assets/audio/ambience.ogg\", SoundOptions::new().volume(0.18).looping(true)));",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                    ui.collapsing("12) Constants Templates", |ui| {
                         if matches!(kind, CustomCodeKind::Constants) {
                             for snippet in [
                                 "pub const PLAYER_SPEED: f32 = 14.0;",
@@ -2227,7 +3031,7 @@ impl QuartzForgeApp {
                         }
                     });
 
-                    ui.collapsing("10) Intercode Relationships", |ui| {
+                    ui.collapsing("13) Intercode Relationships", |ui| {
                         ui.label("update loop -> canvas.run(Action::custom(name)) -> custom event handler via register_custom_event");
                         ui.label("game vars live on Canvas.game_vars and are shared between setup, update, and event handlers");
                         ui.label("plugins should be dispatched via Action::run_plugin or Action::PluginCall; avoid direct plugin calls in update loops");
@@ -2267,6 +3071,32 @@ impl QuartzForgeApp {
 
                 let _ = block;
                 let _ = scene;
+
+                if ensure_terrain_guard {
+                    self.ensure_plugin_imports_guard(
+                        "terrain_collision",
+                        &["use quartz::plugin::terrain_collision::{TerrainCollisionPlugin, TerrainCollisionCall};"],
+                    );
+                }
+                if ensure_grapple_guard {
+                    self.ensure_plugin_imports_guard(
+                        "grapple",
+                        &["use quartz::plugin::grapple::{GrappleCommand, GrappleConstraint, SwingBias};"],
+                    );
+                }
+                if ensure_save_game_guard {
+                    self.ensure_plugin_imports_guard(
+                        "save_game",
+                        &["use quartz::plugin::save_game::SaveGamePlugin;"],
+                    );
+                }
+                if ensure_background_guard {
+                    self.ensure_plugin_imports_guard(
+                        "background",
+                        &["use quartz::plugin::background::BackgroundPlugin;"],
+                    );
+                }
+
                 self.helper_var_name = helper_var_name;
                 self.helper_var_value = helper_var_value;
                 self.helper_var_type = helper_var_type;
@@ -2274,6 +3104,122 @@ impl QuartzForgeApp {
                 if changed {
                     self.touch_and_refresh_preview();
                 }
+            });
+    }
+
+    fn grapple_wizard_window(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Grapple Wizard")
+            .resizable(true)
+            .default_size(egui::vec2(540.0, 520.0))
+            .show(ctx, |ui| {
+                let object_ids: Vec<String> = self
+                    .project_state
+                    .manifest
+                    .scenes
+                    .get(self.project_state.active_scene_index)
+                    .map(|scene| scene.objects.iter().map(|o| o.id.clone()).collect())
+                    .unwrap_or_default();
+
+                if object_ids.is_empty() {
+                    ui.label("Add objects to the scene before configuring grapple mechanics.");
+                    return;
+                }
+
+                if self.grapple_target_object_id.trim().is_empty() {
+                    self.grapple_target_object_id = object_ids[0].clone();
+                }
+
+                ui.checkbox(&mut self.grapple_viz_enabled, "show grapple visualization in scene/camera viewers");
+
+                egui::ComboBox::from_label("target object")
+                    .selected_text(self.grapple_target_object_id.as_str())
+                    .show_ui(ui, |ui| {
+                        for id in &object_ids {
+                            ui.selectable_value(&mut self.grapple_target_object_id, id.clone(), id);
+                        }
+                    });
+
+                ui.separator();
+                ui.checkbox(&mut self.grapple_use_anchor_object, "anchor to object");
+                if self.grapple_use_anchor_object {
+                    if self.grapple_anchor_object_id.trim().is_empty() {
+                        self.grapple_anchor_object_id = object_ids[0].clone();
+                    }
+                    egui::ComboBox::from_label("anchor object")
+                        .selected_text(self.grapple_anchor_object_id.as_str())
+                        .show_ui(ui, |ui| {
+                            for id in &object_ids {
+                                if *id == self.grapple_target_object_id {
+                                    continue;
+                                }
+                                ui.selectable_value(&mut self.grapple_anchor_object_id, id.clone(), id);
+                            }
+                        });
+                } else {
+                    ui.add(Slider::new(&mut self.grapple_anchor_x, -10000.0..=10000.0).text("anchor x"));
+                    ui.add(Slider::new(&mut self.grapple_anchor_y, -10000.0..=10000.0).text("anchor y"));
+                }
+
+                ui.separator();
+                ui.add(Slider::new(&mut self.grapple_length, 1.0..=6000.0).text("rope length"));
+                ui.add(Slider::new(&mut self.grapple_stiffness, 0.0..=1.0).text("stiffness"));
+                ui.add(Slider::new(&mut self.grapple_damping, 0.0..=1.0).text("damping"));
+                ui.add(Slider::new(&mut self.grapple_max_swing_speed, 0.0..=3000.0).text("max swing speed (0 = unlimited)"));
+                ui.checkbox(&mut self.grapple_auto_shorten, "auto shorten");
+
+                egui::ComboBox::from_label("swing bias")
+                    .selected_text(self.grapple_bias.as_str())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.grapple_bias, GrappleBiasOption::None, "None");
+                        ui.selectable_value(&mut self.grapple_bias, GrappleBiasOption::Horizontal, "Horizontal");
+                        ui.selectable_value(&mut self.grapple_bias, GrappleBiasOption::Vertical, "Vertical");
+                    });
+
+                ui.separator();
+                ui.label("Typed API snippets (Action::PluginCall / GrappleCommand)");
+                let attach_snippet = self.build_grapple_attach_snippet();
+                if ui.button("Insert Attach Snippet").clicked() {
+                    self.ensure_plugin_imports_guard(
+                        "grapple",
+                        &["use quartz::plugin::grapple::{GrappleCommand, GrappleConstraint, SwingBias};"],
+                    );
+                    self.insert_snippet_into_best_custom_block(&attach_snippet);
+                    self.status_line = "Inserted grapple attach snippet into custom code block.".to_owned();
+                }
+
+                let set_length_snippet = format!(
+                    "canvas.run(Action::PluginCall {{\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetLength {{\n        target: Target::name(\"{}\"),\n        value: {},\n    }}),\n}});",
+                    self.grapple_target_object_id,
+                    self.grapple_length
+                );
+                if ui.button("Insert SetLength Snippet").clicked() {
+                    self.ensure_plugin_imports_guard(
+                        "grapple",
+                        &["use quartz::plugin::grapple::{GrappleCommand, GrappleConstraint, SwingBias};"],
+                    );
+                    self.insert_snippet_into_best_custom_block(&set_length_snippet);
+                    self.status_line = "Inserted grapple SetLength snippet.".to_owned();
+                }
+
+                let release_snippet = format!(
+                    "canvas.run(Action::PluginCall {{\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Release {{\n        target: Target::name(\"{}\"),\n    }}),\n}});",
+                    self.grapple_target_object_id
+                );
+                if ui.button("Insert Release Snippet").clicked() {
+                    self.ensure_plugin_imports_guard(
+                        "grapple",
+                        &["use quartz::plugin::grapple::{GrappleCommand, GrappleConstraint, SwingBias};"],
+                    );
+                    self.insert_snippet_into_best_custom_block(&release_snippet);
+                    self.status_line = "Inserted grapple Release snippet.".to_owned();
+                }
+
+                ui.collapsing("Current Attach Snippet Preview", |ui| {
+                    let mut preview = attach_snippet.clone();
+                    ui.add(TextEdit::multiline(&mut preview).desired_rows(10).code_editor());
+                });
+
+                ui.label("Syntax note: requires quartz::prelude::* and plugin 'grapple' registered on canvas.");
             });
     }
 
@@ -2287,11 +3233,22 @@ impl QuartzForgeApp {
                     return;
                 };
 
-                let files = Self::collect_editable_files(&root);
+                let refresh_needed = self.file_browser_cached_root.as_ref() != Some(&root)
+                    || self.file_browser_cached_files.is_empty();
+                if refresh_needed {
+                    self.file_browser_cached_files = Self::collect_editable_files(&root);
+                    self.file_browser_cached_root = Some(root.clone());
+                }
+
                 ui.horizontal(|ui| {
-                    if ui.button("Refresh").clicked() {}
+                    if ui.button("Refresh").clicked() {
+                        self.file_browser_cached_files = Self::collect_editable_files(&root);
+                        self.file_browser_cached_root = Some(root.clone());
+                    }
                     ui.label("Manual edits can be tracked as custom overrides.");
                 });
+
+                let files = self.file_browser_cached_files.clone();
 
                 ui.columns(2, |cols| {
                     egui::ScrollArea::vertical().id_salt("generated_file_browser_list").show(&mut cols[0], |ui| {
@@ -2425,7 +3382,8 @@ impl QuartzForgeApp {
                         let lock = if o.lock_transform { " [LOCK]" } else { "" };
                         let cam = if o.advanced.is_camera_space_pinned() { " [CAM]" } else { "" };
                         let bg = if o.is_background { " [BG]" } else { "" };
-                        format!("[{}] {} ({}){}{}{}", i + 1, o.name, o.template.as_str(), lock, cam, bg)
+                        let spawn = if o.spawn_only { " [SPAWN]" } else { "" };
+                        format!("[{}] {} ({}){}{}{}{}", i + 1, o.name, o.template.as_str(), lock, cam, bg, spawn)
                     })
                     .collect()
             })
@@ -2456,6 +3414,17 @@ impl QuartzForgeApp {
                             obj.y = Self::snap_value(obj.y, self.grid_size);
                         }
                     }
+                    self.selected_object_index = scene.objects.len().saturating_sub(1);
+                }
+            }
+            if ui.button("+ Spawn Object").clicked() {
+                self.project_state.add_spawn_only_object_to_active_scene();
+                if let Some(scene) = self
+                    .project_state
+                    .manifest
+                    .scenes
+                    .get(self.project_state.active_scene_index)
+                {
                     self.selected_object_index = scene.objects.len().saturating_sub(1);
                 }
             }
@@ -2526,6 +3495,13 @@ impl QuartzForgeApp {
         changed |= ui.text_edit_singleline(&mut object.id).changed();
         changed |= ui.text_edit_singleline(&mut object.name).changed();
         changed |= ui.checkbox(&mut object.is_background, "background object").changed();
+        if object.is_background {
+            object.spawn_only = false;
+        }
+        changed |= ui.checkbox(&mut object.spawn_only, "spawn-only object").changed();
+        if object.spawn_only {
+            object.is_background = false;
+        }
         changed |= ui.checkbox(&mut object.lock_transform, "lock transform in canvas/editor").changed();
         ui.add_enabled_ui(!object.lock_transform, |ui| {
             changed |= ui.add(Slider::new(&mut object.x, -8000.0..=8000.0).text("x")).changed();
@@ -2654,6 +3630,8 @@ impl QuartzForgeApp {
         ui.label("Advanced Parameter Visibility");
         changed |= ui.checkbox(&mut object.visible.physics, "show physics params").changed();
         changed |= ui.checkbox(&mut object.visible.collision, "show collision params").changed();
+        changed |= ui.checkbox(&mut object.visible.slope, "show slope/surface params").changed();
+        changed |= ui.checkbox(&mut object.visible.planetary, "show planetary gravity params").changed();
         changed |= ui.checkbox(&mut object.visible.camera_space, "show camera-space params").changed();
 
         if object.visible.physics {
@@ -2735,6 +3713,113 @@ impl QuartzForgeApp {
             changed |= ui
                 .add(Slider::new(&mut object.advanced.collision_mask, 0..=64).text("collision mask"))
                 .changed();
+        }
+
+        if object.visible.slope {
+            ui.separator();
+            ui.label("Slope & Surface");
+            changed |= ui.checkbox(&mut object.advanced.slope_enabled, "enable slope offsets").changed();
+            if object.advanced.slope_enabled {
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.slope_left_offset, -1000.0..=1000.0).text("slope left offset"))
+                    .changed();
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.slope_right_offset, -1000.0..=1000.0).text("slope right offset"))
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut object.advanced.slope_auto_rotation, "derive rotation from slope")
+                    .changed();
+            }
+            changed |= ui.checkbox(&mut object.advanced.one_way, "one-way platform").changed();
+            changed |= ui
+                .checkbox(&mut object.advanced.surface_velocity_enabled, "surface conveyor velocity")
+                .changed();
+            if object.advanced.surface_velocity_enabled {
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.surface_velocity_x, -200.0..=200.0).text("surface velocity x"))
+                    .changed();
+            }
+            changed |= ui
+                .checkbox(&mut object.advanced.surface_normal_enabled, "custom surface normal")
+                .changed();
+            if object.advanced.surface_normal_enabled {
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.surface_normal_x, -1.0..=1.0).text("surface normal x"))
+                    .changed();
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.surface_normal_y, -1.0..=1.0).text("surface normal y"))
+                    .changed();
+            }
+            changed |= ui
+                .checkbox(&mut object.advanced.align_to_slope, "align to slope")
+                .changed();
+            if object.advanced.align_to_slope {
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.align_to_slope_speed, 0.0..=64.0).text("align-to-slope speed"))
+                    .changed();
+            }
+        }
+
+        if object.visible.planetary {
+            ui.separator();
+            ui.label("Planetary Gravity & Wells");
+            changed |= ui.checkbox(&mut object.advanced.planet_enabled, "planet collision body").changed();
+            if object.advanced.planet_enabled {
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.planet_radius, 0.0..=8000.0).text("planet radius"))
+                    .changed();
+            }
+            changed |= ui
+                .checkbox(&mut object.advanced.gravity_target_enabled, "gravity target tag")
+                .changed();
+            if object.advanced.gravity_target_enabled {
+                changed |= ui
+                    .text_edit_singleline(&mut object.advanced.gravity_target_tag)
+                    .changed();
+            }
+            changed |= ui
+                .add(Slider::new(&mut object.advanced.gravity_strength, 0.0..=128.0).text("gravity strength"))
+                .changed();
+            changed |= ui
+                .add(Slider::new(&mut object.advanced.gravity_influence_mult, 0.01..=100.0).text("gravity influence mult"))
+                .changed();
+
+            let mut falloff = object.advanced.gravity_falloff;
+            egui::ComboBox::from_label("gravity falloff")
+                .selected_text(falloff.as_str())
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut falloff, QuartzGravityFalloff::Constant, "Constant")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut falloff, QuartzGravityFalloff::Linear, "Linear")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut falloff, QuartzGravityFalloff::InverseSquare, "InverseSquare")
+                        .changed();
+                });
+            if falloff != object.advanced.gravity_falloff {
+                object.advanced.gravity_falloff = falloff;
+                changed = true;
+            }
+
+            changed |= ui
+                .checkbox(&mut object.advanced.gravity_all_sources, "all gravity sources")
+                .changed();
+            changed |= ui
+                .checkbox(&mut object.advanced.gravity_identity_enabled, "gravity identity")
+                .changed();
+            if object.advanced.gravity_identity_enabled {
+                changed |= ui
+                    .text_edit_singleline(&mut object.advanced.gravity_identity)
+                    .changed();
+            }
+            changed |= ui.checkbox(&mut object.advanced.auto_align, "auto align").changed();
+            if object.advanced.auto_align {
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.auto_align_speed, 0.0..=64.0).text("auto align speed"))
+                    .changed();
+            }
         }
 
         if object.visible.camera_space {
@@ -3042,15 +4127,43 @@ impl QuartzForgeApp {
 
     fn touch_and_refresh_preview(&mut self) {
         self.project_state.dirty = true;
-        self.quartz_preview = self.build_scene_source();
+        self.preview_refresh_pending = true;
+    }
+
+    fn flush_preview_refresh_if_due(&mut self, force: bool) {
+        if !self.preview_refresh_pending {
+            return;
+        }
+        let now = Instant::now();
+        let due = force
+            || self
+                .last_preview_refresh_at
+                .map(|at| now.duration_since(at) >= Duration::from_millis(120))
+                .unwrap_or(true);
+        if due {
+            self.quartz_preview = self.build_scene_source();
+            self.last_preview_refresh_at = Some(now);
+            self.preview_refresh_pending = false;
+        }
     }
 }
 
 impl eframe::App for QuartzForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hot_reload.poll();
-        // Keep the editor reactive at ~60 FPS while the viewport tooling evolves.
-        ctx.request_repaint_after(Duration::from_millis(16));
+        self.flush_preview_refresh_if_due(false);
+
+        let needs_fast_repaint = self.canvas_drag.is_some()
+            || self.camera_view_drag.is_some();
+        if needs_fast_repaint {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.active_scene_has_animated_assets() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.preview_refresh_pending {
+            ctx.request_repaint_after(Duration::from_millis(40));
+        } else if matches!(self.hot_reload.state, PreviewState::Running) {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
 
         if self.show_startup_prompt && self.project_root.is_none() {
             egui::Window::new("Create or Open Project")

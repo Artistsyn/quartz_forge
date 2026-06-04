@@ -124,6 +124,8 @@ pub struct QuartzObjectBlueprint {
     pub lock_transform: bool,
     #[serde(default)]
     pub is_background: bool,
+    #[serde(default)]
+    pub spawn_only: bool,
     pub advanced: ObjectAdvancedParams,
     pub visible: ObjectParamVisibility,
 }
@@ -148,6 +150,7 @@ impl QuartzObjectBlueprint {
             enabled: true,
             lock_transform: false,
             is_background: false,
+            spawn_only: false,
             advanced: ObjectAdvancedParams::default(),
             visible: ObjectParamVisibility::default(),
         }
@@ -155,6 +158,7 @@ impl QuartzObjectBlueprint {
 
     pub fn apply_background_defaults(&mut self, cell_w: f32, cell_h: f32) {
         self.is_background = true;
+        self.spawn_only = false;
         self.w = cell_w.max(1.0);
         self.h = cell_h.max(1.0);
         self.layer = -10;
@@ -162,10 +166,19 @@ impl QuartzObjectBlueprint {
         self.advanced.momentum_x = 0.0;
         self.advanced.momentum_y = 0.0;
     }
+
+    pub fn apply_spawn_only_defaults(&mut self) {
+        self.spawn_only = true;
+        self.is_background = false;
+    }
 }
 
 fn default_visual_asset_fps() -> f32 {
     12.0
+}
+
+fn default_settext_font_asset_path() -> String {
+    String::new()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +225,54 @@ pub struct ObjectAdvancedParams {
     pub material: ObjectPhysicsMaterialSpec,
     pub collision_layer: u32,
     pub collision_mask: u32,
+    #[serde(default)]
+    pub slope_enabled: bool,
+    #[serde(default)]
+    pub slope_left_offset: f32,
+    #[serde(default)]
+    pub slope_right_offset: f32,
+    #[serde(default)]
+    pub slope_auto_rotation: bool,
+    #[serde(default)]
+    pub one_way: bool,
+    #[serde(default)]
+    pub surface_velocity_enabled: bool,
+    #[serde(default)]
+    pub surface_velocity_x: f32,
+    #[serde(default)]
+    pub surface_normal_enabled: bool,
+    #[serde(default = "default_surface_normal_x")]
+    pub surface_normal_x: f32,
+    #[serde(default = "default_surface_normal_y")]
+    pub surface_normal_y: f32,
+    #[serde(default)]
+    pub align_to_slope: bool,
+    #[serde(default = "default_align_to_slope_speed")]
+    pub align_to_slope_speed: f32,
+    #[serde(default)]
+    pub planet_enabled: bool,
+    #[serde(default)]
+    pub planet_radius: f32,
+    #[serde(default)]
+    pub gravity_target_enabled: bool,
+    #[serde(default)]
+    pub gravity_target_tag: String,
+    #[serde(default = "default_gravity_strength")]
+    pub gravity_strength: f32,
+    #[serde(default = "default_gravity_influence_mult")]
+    pub gravity_influence_mult: f32,
+    #[serde(default)]
+    pub gravity_falloff: QuartzGravityFalloff,
+    #[serde(default)]
+    pub gravity_all_sources: bool,
+    #[serde(default)]
+    pub gravity_identity_enabled: bool,
+    #[serde(default)]
+    pub gravity_identity: String,
+    #[serde(default)]
+    pub auto_align: bool,
+    #[serde(default = "default_auto_align_speed")]
+    pub auto_align_speed: f32,
     pub ignore_zoom: bool,
     pub screen_space: bool,
 }
@@ -230,8 +291,55 @@ impl Default for ObjectAdvancedParams {
             material: ObjectPhysicsMaterialSpec::default(),
             collision_layer: 1,
             collision_mask: 1,
+            slope_enabled: false,
+            slope_left_offset: 0.0,
+            slope_right_offset: 0.0,
+            slope_auto_rotation: false,
+            one_way: false,
+            surface_velocity_enabled: false,
+            surface_velocity_x: 0.0,
+            surface_normal_enabled: false,
+            surface_normal_x: default_surface_normal_x(),
+            surface_normal_y: default_surface_normal_y(),
+            align_to_slope: false,
+            align_to_slope_speed: default_align_to_slope_speed(),
+            planet_enabled: false,
+            planet_radius: 0.0,
+            gravity_target_enabled: false,
+            gravity_target_tag: String::new(),
+            gravity_strength: default_gravity_strength(),
+            gravity_influence_mult: default_gravity_influence_mult(),
+            gravity_falloff: QuartzGravityFalloff::default(),
+            gravity_all_sources: false,
+            gravity_identity_enabled: false,
+            gravity_identity: String::new(),
+            auto_align: false,
+            auto_align_speed: default_auto_align_speed(),
             ignore_zoom: false,
             screen_space: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuartzGravityFalloff {
+    Constant,
+    Linear,
+    InverseSquare,
+}
+
+impl Default for QuartzGravityFalloff {
+    fn default() -> Self {
+        Self::Linear
+    }
+}
+
+impl QuartzGravityFalloff {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuartzGravityFalloff::Constant => "Constant",
+            QuartzGravityFalloff::Linear => "Linear",
+            QuartzGravityFalloff::InverseSquare => "InverseSquare",
         }
     }
 }
@@ -252,6 +360,30 @@ impl ObjectAdvancedParams {
 
 fn default_pivot_component() -> f32 {
     0.5
+}
+
+fn default_surface_normal_x() -> f32 {
+    0.0
+}
+
+fn default_surface_normal_y() -> f32 {
+    -1.0
+}
+
+fn default_align_to_slope_speed() -> f32 {
+    8.0
+}
+
+fn default_gravity_strength() -> f32 {
+    1.0
+}
+
+fn default_gravity_influence_mult() -> f32 {
+    3.0
+}
+
+fn default_auto_align_speed() -> f32 {
+    10.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +469,8 @@ pub struct ObjectParamVisibility {
     pub transform: bool,
     pub physics: bool,
     pub collision: bool,
+    pub slope: bool,
+    pub planetary: bool,
     pub camera_space: bool,
 }
 
@@ -493,6 +627,8 @@ impl Default for ObjectParamVisibility {
             transform: true,
             physics: false,
             collision: false,
+            slope: false,
+            planetary: false,
             camera_space: false,
         }
     }
@@ -621,6 +757,46 @@ impl LogicNode {
     }
 }
 
+/// Operator for ModVar actions (mirrors quartz MathOp).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum QuartzMathOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl Default for QuartzMathOp {
+    fn default() -> Self { QuartzMathOp::Add }
+}
+
+/// The type of literal or reference held by a QuartzExpr.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum QuartzExprKind {
+    F32,
+    I32,
+    Bool,
+    Str,
+    Var,
+}
+
+impl Default for QuartzExprKind {
+    fn default() -> Self { QuartzExprKind::F32 }
+}
+
+/// A simple expression value for SetVar / ModVar fields.
+/// Covers literal constants and variable references.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuartzExpr {
+    pub kind: QuartzExprKind,
+    /// Raw text: "3.14" for F32, "score" for Var, "true" for Bool, etc.
+    pub raw: String,
+}
+
+impl Default for QuartzExpr {
+    fn default() -> Self { Self { kind: QuartzExprKind::F32, raw: "0.0".to_owned() } }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QuartzAction {
     Teleport {
@@ -705,6 +881,11 @@ pub enum QuartzAction {
         animation_asset: String,
         fps: f32,
     },
+    PlaySound {
+        path: String,
+        volume: f32,
+        looping: bool,
+    },
     SetZoom {
         value: f32,
     },
@@ -714,6 +895,9 @@ pub enum QuartzAction {
     RunPlugin {
         name: String,
         data: String,
+    },
+    Expr {
+        raw: String,
     },
     Custom {
         name: String,
@@ -729,6 +913,33 @@ pub enum QuartzAction {
     CameraZoomPunch {
         amount: f32,
         duration_s: f32,
+    },
+    /// Set a named variable to a literal or variable-reference expression.
+    SetVar {
+        name: String,
+        value: QuartzExpr,
+    },
+    /// Modify (+=, -=, *=, /=) a named variable by an expression.
+    ModVar {
+        name: String,
+        op: QuartzMathOp,
+        operand: QuartzExpr,
+    },
+    /// Spawn a clone of a spawn-only template object at the given location.
+    SpawnObject {
+        template_id: String,
+        location: QuartzLocationRef,
+    },
+    /// Set text content on a text-drawable game object.
+    /// `color_rgb` is [r, g, b] (0-255 each).
+    /// `font_asset_path` is optional and project-root relative; blank falls back to `Font::default()`.
+    SetText {
+        target: QuartzTargetRef,
+        content: String,
+        font_size: f32,
+        color_rgb: [u8; 3],
+        #[serde(default = "default_settext_font_asset_path")]
+        font_asset_path: String,
     },
     Conditional {
         condition: QuartzCondition,
@@ -802,9 +1013,17 @@ impl QuartzAction {
                     fps
                 )
             }
+            QuartzAction::PlaySound {
+                path,
+                volume,
+                looping,
+            } => {
+                format!("PlaySound [{} @ {:.2} loop={}]", path, volume, looping)
+            }
             QuartzAction::SetZoom { value } => format!("SetZoom {value:.2}"),
             QuartzAction::SmoothZoom { value } => format!("SmoothZoom {value:.2}"),
             QuartzAction::RunPlugin { name, .. } => format!("RunPlugin {name}"),
+            QuartzAction::Expr { raw } => format!("Expr({raw})"),
             QuartzAction::Custom { name } => format!("Custom {name}"),
             QuartzAction::CameraFlash {
                 duration_s,
@@ -817,6 +1036,10 @@ impl QuartzAction {
             QuartzAction::CameraZoomPunch { amount, duration_s } => {
                 format!("CameraZoomPunch {amount:.2} for {duration_s:.2}s")
             }
+            QuartzAction::SetVar { name, value } => format!("SetVar {} = {:?} ({})", name, value.raw, format!("{:?}", value.kind)),
+            QuartzAction::ModVar { name, op, operand } => format!("ModVar {} {:?}= {:?}", name, op, operand.raw),
+            QuartzAction::SpawnObject { template_id, .. } => format!("SpawnObject [{}]", template_id),
+            QuartzAction::SetText { target, content, .. } => format!("SetText {} = {:?}", target.short_label(), content),
             QuartzAction::Conditional { condition, .. } => {
                 format!("Conditional {}", condition.short_label())
             }
@@ -846,9 +1069,15 @@ impl QuartzAction {
             | QuartzAction::AddTag { target, .. }
             | QuartzAction::RemoveTag { target, .. }
             | QuartzAction::SetAnimation { target, .. } => target.collect_object_refs(out),
-            QuartzAction::SetZoom { .. }
+            QuartzAction::SetText { target, .. } => target.collect_object_refs(out),
+            QuartzAction::SetVar { .. }
+            | QuartzAction::ModVar { .. }
+            | QuartzAction::SpawnObject { .. }
+            | QuartzAction::PlaySound { .. }
+            | QuartzAction::SetZoom { .. }
             | QuartzAction::SmoothZoom { .. }
             | QuartzAction::RunPlugin { .. }
+            | QuartzAction::Expr { .. }
             | QuartzAction::Custom { .. }
             | QuartzAction::CameraFlash { .. }
             | QuartzAction::CameraShake { .. }
@@ -882,6 +1111,12 @@ pub enum QuartzCondition {
     KeyNotHeld {
         key: String,
     },
+    Collision {
+        target: QuartzTargetRef,
+    },
+    NoCollision {
+        target: QuartzTargetRef,
+    },
     CollisionWith {
         object_a: String,
         object_b: String,
@@ -890,6 +1125,12 @@ pub enum QuartzCondition {
         variable: String,
         op: CompareOp,
         value: f32,
+    },
+    VarExists {
+        variable: String,
+    },
+    Expr {
+        raw: String,
     },
     And {
         left: Box<QuartzCondition>,
@@ -942,6 +1183,12 @@ impl QuartzCondition {
             QuartzCondition::Always => "Always".to_owned(),
             QuartzCondition::KeyHeld { key } => format!("KeyHeld({key})"),
             QuartzCondition::KeyNotHeld { key } => format!("KeyNotHeld({key})"),
+            QuartzCondition::Collision { target } => {
+                format!("Collision({})", target.short_label())
+            }
+            QuartzCondition::NoCollision { target } => {
+                format!("NoCollision({})", target.short_label())
+            }
             QuartzCondition::CollisionWith { object_a, object_b } => {
                 format!("Collision({object_a}, {object_b})")
             }
@@ -950,6 +1197,10 @@ impl QuartzCondition {
                 op,
                 value,
             } => format!("{} {} {}", variable, op.as_str(), value),
+            QuartzCondition::VarExists { variable } => {
+                format!("VarExists({variable})")
+            }
+            QuartzCondition::Expr { raw } => format!("Expr({raw})"),
             QuartzCondition::And { left, right } => {
                 format!("({}) AND ({})", left.short_label(), right.short_label())
             }
@@ -997,7 +1248,9 @@ impl QuartzCondition {
                 right.collect_object_refs(out);
             }
             QuartzCondition::Not { inner } => inner.collect_object_refs(out),
-            QuartzCondition::IsVisible { target }
+            QuartzCondition::Collision { target }
+            | QuartzCondition::NoCollision { target }
+            | QuartzCondition::IsVisible { target }
             | QuartzCondition::IsHidden { target }
             | QuartzCondition::IsMoving { target }
             | QuartzCondition::Grounded { target }
@@ -1009,6 +1262,8 @@ impl QuartzCondition {
             | QuartzCondition::KeyHeld { .. }
             | QuartzCondition::KeyNotHeld { .. }
             | QuartzCondition::VarCompare { .. }
+            | QuartzCondition::VarExists { .. }
+            | QuartzCondition::Expr { .. }
             | QuartzCondition::CrystallineEnabled
             | QuartzCondition::Plugin { .. } => {}
         }
