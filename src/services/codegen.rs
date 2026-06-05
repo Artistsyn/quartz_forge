@@ -58,11 +58,8 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
         ));
         append_advanced_builder_lines(&mut out, &obj.advanced);
         if obj.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
-            if let Some(bytes_expr) = asset_include_expr(&obj.visual_asset_path) {
-                out.push_str(&format!(
-                    "        .image(quartz::sprite::load_image({}))\n",
-                    bytes_expr
-                ));
+            if let Some(image_expr) = static_image_expr(obj) {
+                out.push_str(&format!("        .image({})\n", image_expr));
             }
         }
         if obj.advanced.is_camera_space_pinned() {
@@ -235,11 +232,8 @@ pub fn object_registration_body(object: &crate::core::quartz_domain::QuartzObjec
     ));
     append_advanced_builder_lines(&mut out, &object.advanced);
     if object.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
-        if let Some(bytes_expr) = asset_include_expr(&object.visual_asset_path) {
-            out.push_str(&format!(
-                "        .image(quartz::sprite::load_image({}))\n",
-                bytes_expr
-            ));
+        if let Some(image_expr) = static_image_expr(object) {
+            out.push_str(&format!("        .image({})\n", image_expr));
         }
     }
     if object.advanced.is_camera_space_pinned() {
@@ -306,11 +300,8 @@ pub fn spawn_template_body(object: &crate::core::quartz_domain::QuartzObjectBlue
     ));
     append_advanced_builder_lines(&mut out, &object.advanced);
     if object.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
-        if let Some(bytes_expr) = asset_include_expr(&object.visual_asset_path) {
-            out.push_str(&format!(
-                "        .image(quartz::sprite::load_image({}))\n",
-                bytes_expr
-            ));
+        if let Some(image_expr) = static_image_expr(object) {
+            out.push_str(&format!("        .image({})\n", image_expr));
         }
     }
     if !object.tags.is_empty() {
@@ -1035,5 +1026,35 @@ fn asset_include_expr(path: &str) -> Option<String> {
         "include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{}\"))",
         escaped
     ))
+}
+
+fn object_asset_cache_key(object: &crate::core::quartz_domain::QuartzObjectBlueprint) -> String {
+    let candidate = object.visual_asset_cache_key.trim();
+    if candidate.is_empty() {
+        if object.visual_asset_path.trim().is_empty() {
+            object.id.clone()
+        } else {
+            object.visual_asset_path.replace('\\', "/")
+        }
+    } else {
+        candidate.to_owned()
+    }
+}
+
+fn static_image_expr(object: &crate::core::quartz_domain::QuartzObjectBlueprint) -> Option<String> {
+    let bytes_expr = asset_include_expr(&object.visual_asset_path)?;
+    if object.visual_asset_use_canvas_cache {
+        let key = object_asset_cache_key(object).replace('"', "\\\"");
+        if object.visual_asset_size_aware_cache {
+            Some(format!(
+                "canvas.load_image_sized_cached(\"{}\", {}, {}, {})",
+                key, bytes_expr, object.w, object.h
+            ))
+        } else {
+            Some(format!("canvas.load_image_cached(\"{}\", {})", key, bytes_expr))
+        }
+    } else {
+        Some(format!("quartz::sprite::load_image({})", bytes_expr))
+    }
 }
 

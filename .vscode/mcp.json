@@ -1,14 +1,8 @@
 {
     "servers": {
         "quartz_forge_mcp": {
-            "command": "cargo",
+            "command": "c:/Users/ArtistRyzenWhite/RProjects/FlowMake/quartz_forge/mcp_server/target/debug/quartz_forge_mcp.exe",
             "args": [
-                "run",
-                "--manifest-path",
-                "quartz_forge/Cargo.toml",
-                "--bin",
-                "quartz_forge_mcp",
-                "--",
                 "--stdio"
             ]
         }

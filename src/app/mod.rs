@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use anyhow::{anyhow, Context, Result};
+
 mod editors;
 mod condition_editor;
 mod logic_events_editor;
@@ -19,6 +21,8 @@ use crate::core::quartz_domain::{
 use crate::services::codegen;
 use crate::services::hot_reload::{HotReloadService, PreviewState};
 use crate::services::persistence;
+use crate::services::project_import;
+use crate::services::project_sync;
 use crate::app::syntax_highlight::code_layouter;
 
 #[derive(Debug, Clone, Copy)]
@@ -123,9 +127,12 @@ pub struct QuartzForgeApp {
     project_state: EditorProjectState,
     hot_reload: HotReloadService,
     status_line: String,
+    project_sync_report: Option<persistence::ProjectSyncReport>,
+    show_project_sync_prompt: bool,
     new_scene_name: String,
     new_project_name: String,
     selected_object_index: usize,
+    #[allow(dead_code)]
     selected_logic_tree_index: usize,
     selected_event_index: usize,
     quartz_preview: String,
@@ -140,13 +147,15 @@ pub struct QuartzForgeApp {
     show_pivot_points: bool,
     show_object_menu_window: bool,
     show_event_builder_window: bool,
-    show_legacy_update_scripts_window: bool,
+    dock_object_menu_window: bool,
+    dock_event_builder_window: bool,
     show_spawn_overlay: bool,
     show_constants_window: bool,
     show_game_state_window: bool,
     show_typed_vars_window: bool,
     show_custom_events_window: bool,
     show_update_loops_window: bool,
+    show_background_designer_window: bool,
     show_top_level_window: bool,
     show_file_browser_window: bool,
     show_startup_prompt: bool,
@@ -164,6 +173,14 @@ pub struct QuartzForgeApp {
     helper_var_name: String,
     helper_var_value: String,
     helper_var_type: HelperVarType,
+    background_key: String,
+    background_cache_dir: String,
+    background_use_disk_cache: bool,
+    background_top_rgb: [u8; 3],
+    background_bottom_rgb: [u8; 3],
+    background_star_density: u32,
+    background_star_seed: u64,
+    background_vertical_fade: u32,
     show_grapple_wizard_window: bool,
     grapple_viz_enabled: bool,
     grapple_target_object_id: String,
@@ -188,6 +205,8 @@ impl Default for QuartzForgeApp {
             project_state: EditorProjectState::new("untitled_project".to_owned()),
             hot_reload: HotReloadService::default(),
             status_line: "Create or load a Quartz Forge project to begin.".to_owned(),
+            project_sync_report: None,
+            show_project_sync_prompt: false,
             new_scene_name: "new_scene".to_owned(),
             new_project_name: "my_quartz_game".to_owned(),
             selected_object_index: 0,
@@ -205,13 +224,15 @@ impl Default for QuartzForgeApp {
             show_pivot_points: false,
             show_object_menu_window: true,
             show_event_builder_window: true,
-            show_legacy_update_scripts_window: false,
+            dock_object_menu_window: false,
+            dock_event_builder_window: false,
             show_spawn_overlay: true,
             show_constants_window: false,
             show_game_state_window: false,
             show_typed_vars_window: false,
             show_custom_events_window: false,
             show_update_loops_window: false,
+            show_background_designer_window: false,
             show_top_level_window: false,
             show_file_browser_window: false,
             show_startup_prompt: true,
@@ -229,6 +250,14 @@ impl Default for QuartzForgeApp {
             helper_var_name: "score".to_owned(),
             helper_var_value: "0".to_owned(),
             helper_var_type: HelperVarType::I32,
+            background_key: "sky".to_owned(),
+            background_cache_dir: "cache/backgrounds".to_owned(),
+            background_use_disk_cache: false,
+            background_top_rgb: [8, 26, 74],
+            background_bottom_rgb: [104, 194, 255],
+            background_star_density: 300,
+            background_star_seed: 0xCAFE_BABE,
+            background_vertical_fade: 200,
             show_grapple_wizard_window: false,
             grapple_viz_enabled: true,
             grapple_target_object_id: "player".to_owned(),
@@ -525,14 +554,24 @@ impl QuartzForgeApp {
             ui.checkbox(&mut self.show_spawn_overlay, "show spawn overlay");
         });
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.show_object_menu_window, "object menu window");
-            ui.checkbox(&mut self.show_event_builder_window, "event builder window");
-            ui.checkbox(&mut self.show_legacy_update_scripts_window, "legacy update scripts window");
+            if ui.checkbox(&mut self.show_object_menu_window, "object menu window").changed() {
+                self.dock_object_menu_window = false;
+                if self.show_object_menu_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("object_menu_window"), true);
+                }
+            }
+            if ui.checkbox(&mut self.show_event_builder_window, "event builder window").changed() {
+                self.dock_event_builder_window = false;
+                if self.show_event_builder_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("event_builder_window"), true);
+                }
+            }
             ui.checkbox(&mut self.show_constants_window, "constants window");
             ui.checkbox(&mut self.show_game_state_window, "game state vars window");
             ui.checkbox(&mut self.show_typed_vars_window, "typed vars window");
             ui.checkbox(&mut self.show_custom_events_window, "custom events window");
             ui.checkbox(&mut self.show_update_loops_window, "update loops window");
+            ui.checkbox(&mut self.show_background_designer_window, "background designer window");
             ui.checkbox(&mut self.show_top_level_window, "top level window");
             ui.checkbox(&mut self.show_file_browser_window, "file browser window");
             ui.checkbox(&mut self.show_grapple_wizard_window, "grapple wizard window");
@@ -582,8 +621,10 @@ impl QuartzForgeApp {
                 });
         }
 
-        if self.show_object_menu_window {
+        let object_menu_window_id = egui::Id::new("object_menu_window");
+        if self.show_object_menu_window && !self.dock_object_menu_window {
             egui::Window::new("Object Menu")
+                .id(object_menu_window_id)
                 .resizable(true)
                 .collapsible(true)
                 .default_size(egui::vec2(440.0, 620.0))
@@ -594,10 +635,15 @@ impl QuartzForgeApp {
                             self.objects_editor(ui);
                         });
                 });
+            if Self::window_is_collapsed(ctx, object_menu_window_id) {
+                self.dock_object_menu_window = true;
+            }
         }
 
-        if self.show_event_builder_window {
+        let event_builder_window_id = egui::Id::new("event_builder_window");
+        if self.show_event_builder_window && !self.dock_event_builder_window {
             egui::Window::new("Event Builder")
+                .id(event_builder_window_id)
                 .resizable(true)
                 .collapsible(true)
                 .default_size(egui::vec2(520.0, 620.0))
@@ -608,20 +654,9 @@ impl QuartzForgeApp {
                             self.events_editor(ui);
                         });
                 });
-        }
-
-        if self.show_legacy_update_scripts_window {
-            egui::Window::new("Update Scripts (Legacy)")
-                .resizable(true)
-                .collapsible(true)
-                .default_size(egui::vec2(500.0, 620.0))
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("legacy_update_scripts_window_scroll")
-                        .show(ui, |ui| {
-                            self.logic_editor(ui);
-                        });
-                });
+            if Self::window_is_collapsed(ctx, event_builder_window_id) {
+                self.dock_event_builder_window = true;
+            }
         }
 
         if self.show_constants_window {
@@ -639,6 +674,9 @@ impl QuartzForgeApp {
         if self.show_update_loops_window {
             self.custom_code_window(ctx, CustomCodeKind::UpdateLoops, "Update Loops");
         }
+        if self.show_background_designer_window {
+            self.background_designer_window(ctx);
+        }
         if self.show_top_level_window {
             self.custom_code_window(ctx, CustomCodeKind::TopLevel, "Top Level Code");
         }
@@ -648,6 +686,62 @@ impl QuartzForgeApp {
         if self.show_grapple_wizard_window {
             self.grapple_wizard_window(ctx);
         }
+
+        self.floating_window_dock_tray(ctx);
+    }
+
+    fn window_is_collapsed(ctx: &egui::Context, window_id: egui::Id) -> bool {
+        !egui::collapsing_header::CollapsingState::load_with_default_open(
+            ctx,
+            window_id.with("collapsing"),
+            true,
+        )
+        .is_open()
+    }
+
+    fn set_window_open_state(ctx: &egui::Context, window_id: egui::Id, open: bool) {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ctx,
+            window_id.with("collapsing"),
+            true,
+        );
+        state.set_open(open);
+        state.store(ctx);
+        ctx.request_repaint();
+    }
+
+    fn floating_window_dock_tray(&mut self, ctx: &egui::Context) {
+        if !((self.show_object_menu_window && self.dock_object_menu_window)
+            || (self.show_event_builder_window && self.dock_event_builder_window))
+        {
+            return;
+        }
+
+        egui::Area::new(egui::Id::new("floating_window_dock_tray"))
+            .anchor(Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
+            .show(ctx, |ui| {
+                egui::Frame::window(ui.style())
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.label("Docked Windows");
+                        ui.horizontal_wrapped(|ui| {
+                            if self.show_object_menu_window
+                                && self.dock_object_menu_window
+                                && ui.button("Object Menu").clicked()
+                            {
+                                self.dock_object_menu_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("object_menu_window"), true);
+                            }
+                            if self.show_event_builder_window
+                                && self.dock_event_builder_window
+                                && ui.button("Event Builder").clicked()
+                            {
+                                self.dock_event_builder_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("event_builder_window"), true);
+                            }
+                        });
+                    });
+            });
     }
 
     fn active_scene_has_animated_assets(&self) -> bool {
@@ -917,6 +1011,14 @@ impl QuartzForgeApp {
             if !obj_rect.intersects(rect) {
                 continue;
             }
+            let asset_quad = Self::rotated_rect_points(
+                obj_rect.min,
+                obj_rect.width(),
+                obj_rect.height(),
+                obj.advanced.pivot_x,
+                obj.advanced.pivot_y,
+                Self::effective_rotation_deg(obj),
+            );
             let selected = idx == self.selected_object_index;
             let fill = if is_spawn_ghost {
                 Color32::from_rgba_unmultiplied(255, 180, 80, if selected { 72 } else { 42 })
@@ -939,15 +1041,7 @@ impl QuartzForgeApp {
             painter.rect_filled(obj_rect, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 16));
             match obj.template {
                 ObjectTemplate::Rectangle => {
-                    let rotated = Self::rotated_rect_points(
-                        obj_rect.min,
-                        obj_rect.width(),
-                        obj_rect.height(),
-                        obj.advanced.pivot_x,
-                        obj.advanced.pivot_y,
-                        Self::effective_rotation_deg(obj),
-                    );
-                    painter.add(egui::Shape::convex_polygon(rotated.to_vec(), fill, stroke));
+                    painter.add(egui::Shape::convex_polygon(asset_quad.to_vec(), fill, stroke));
                 }
                 ObjectTemplate::Circle => {
                     let center = obj_rect.center();
@@ -968,6 +1062,7 @@ impl QuartzForgeApp {
                 project_root.as_deref(),
                 obj,
                 obj_rect,
+                asset_quad,
                 asset_tint,
             );
             if is_spawn_ghost {
@@ -1342,6 +1437,14 @@ impl QuartzForgeApp {
             if !obj_rect.intersects(view_rect) {
                 continue;
             }
+            let asset_quad = Self::rotated_rect_points(
+                obj_rect.min,
+                obj_rect.width(),
+                obj_rect.height(),
+                obj.advanced.pivot_x,
+                obj.advanced.pivot_y,
+                Self::effective_rotation_deg(obj),
+            );
             let fill = if is_spawn_ghost {
                 Color32::from_rgba_unmultiplied(255, 180, 80, 54)
             } else if obj.advanced.is_camera_space_pinned() {
@@ -1356,15 +1459,7 @@ impl QuartzForgeApp {
             };
             match obj.template {
                 ObjectTemplate::Rectangle => {
-                    let rotated = Self::rotated_rect_points(
-                        obj_rect.min,
-                        obj_rect.width(),
-                        obj_rect.height(),
-                        obj.advanced.pivot_x,
-                        obj.advanced.pivot_y,
-                        Self::effective_rotation_deg(obj),
-                    );
-                    painter.add(egui::Shape::convex_polygon(rotated.to_vec(), fill, stroke));
+                    painter.add(egui::Shape::convex_polygon(asset_quad.to_vec(), fill, stroke));
                 }
                 ObjectTemplate::Circle => {
                     let center = obj_rect.center();
@@ -1385,6 +1480,7 @@ impl QuartzForgeApp {
                 project_root.as_deref(),
                 obj,
                 obj_rect,
+                asset_quad,
                 asset_tint,
             );
             if is_spawn_ghost {
@@ -1866,6 +1962,103 @@ impl QuartzForgeApp {
         )
     }
 
+    fn background_designer_snippet(&self) -> String {
+        let key = self.background_key.trim();
+        let key = if key.is_empty() { "sky" } else { key };
+        let [tr, tg, tb] = self.background_top_rgb;
+        let [br, bg, bb] = self.background_bottom_rgb;
+        let cache_arg = if self.background_use_disk_cache {
+            let dir = self
+                .background_cache_dir
+                .trim()
+                .replace('\\', "/")
+                .replace('"', "\\\"");
+            format!("Some(\"{}\")", if dir.is_empty() { "cache/backgrounds" } else { &dir })
+        } else {
+            "None".to_owned()
+        };
+
+        format!(
+            "#[cfg(plugin_background)]\n{{\n    use quartz::plugin::background::{{BackgroundLayer, BackgroundPlugin, LayeredBackground}};\n\n    let mut qf_background = BackgroundPlugin::new(1280, 720);\n    let qf_{key}_bg = LayeredBackground::new()\n        .with_layer(BackgroundLayer::GradientVertical {{ top: ({tr}, {tg}, {tb}), bottom: ({br}, {bg}, {bb}) }})\n        .with_layer(BackgroundLayer::Starfield {{\n            density: {density},\n            seed: {seed},\n            size_range: (0, 1),\n            brightness_range: (100, 255),\n            vertical_fade: Some({fade}),\n            scale: None,\n        }});\n\n    qf_background.set_background(\"{key}\", qf_{key}_bg, {cache_arg});\n    canvas.add_plugin(qf_background);\n    canvas.run(Action::run_plugin(\"background\", \"set:{key}\"));\n}}\n\n#[cfg(not(plugin_background))]\n{{\n    // Background plugin not installed.\n    // Install by cloning Artistsyn/background into quartz/src/plugin/background.\n}}\n",
+            key = key,
+            tr = tr,
+            tg = tg,
+            tb = tb,
+            br = br,
+            bg = bg,
+            bb = bb,
+            density = self.background_star_density,
+            seed = self.background_star_seed,
+            fade = self.background_vertical_fade,
+            cache_arg = cache_arg,
+        )
+    }
+
+    fn background_designer_window(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Background Designer")
+            .resizable(true)
+            .default_size(egui::vec2(620.0, 620.0))
+            .show(ctx, |ui| {
+                ui.label("Quartz background plugin authoring (AI+user roundtrip helper)");
+                ui.label("Generates plugin-safe code for LayeredBackground + BackgroundPlugin.");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label("background key");
+                    ui.text_edit_singleline(&mut self.background_key);
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.background_use_disk_cache, "enable disk cache");
+                    if self.background_use_disk_cache {
+                        ui.label("cache dir");
+                        ui.text_edit_singleline(&mut self.background_cache_dir);
+                    }
+                });
+
+                ui.separator();
+                ui.label("Gradient (top -> bottom)");
+                ui.horizontal(|ui| {
+                    ui.add(Slider::new(&mut self.background_top_rgb[0], 0..=255).text("top r"));
+                    ui.add(Slider::new(&mut self.background_top_rgb[1], 0..=255).text("top g"));
+                    ui.add(Slider::new(&mut self.background_top_rgb[2], 0..=255).text("top b"));
+                });
+                ui.horizontal(|ui| {
+                    ui.add(Slider::new(&mut self.background_bottom_rgb[0], 0..=255).text("bottom r"));
+                    ui.add(Slider::new(&mut self.background_bottom_rgb[1], 0..=255).text("bottom g"));
+                    ui.add(Slider::new(&mut self.background_bottom_rgb[2], 0..=255).text("bottom b"));
+                });
+
+                ui.separator();
+                ui.label("Starfield layer");
+                ui.add(Slider::new(&mut self.background_star_density, 10..=3000).text("density"));
+                ui.add(Slider::new(&mut self.background_vertical_fade, 0..=2000).text("vertical fade"));
+                ui.horizontal(|ui| {
+                    ui.label("seed");
+                    ui.add(egui::DragValue::new(&mut self.background_star_seed).speed(1.0));
+                });
+
+                ui.separator();
+                let mut snippet = self.background_designer_snippet();
+                ui.label("Generated snippet");
+                ui.add(
+                    TextEdit::multiline(&mut snippet)
+                        .desired_rows(18)
+                        .code_editor(),
+                );
+
+                ui.horizontal(|ui| {
+                    if ui.button("Insert Into Best Custom Block").clicked() {
+                        self.ensure_plugin_imports_guard("background", &[]);
+                        self.insert_snippet_into_best_custom_block(&snippet);
+                        self.status_line = "Inserted background designer snippet into custom code block.".to_owned();
+                    }
+                    if ui.button("Open Top Level Window").clicked() {
+                        self.show_top_level_window = true;
+                    }
+                });
+            });
+    }
+
     fn ensure_plugin_imports_guard(
         &mut self,
         plugin_name: &str,
@@ -2182,7 +2375,8 @@ impl QuartzForgeApp {
         cache: &mut HashMap<String, AssetPreviewTextures>,
         project_root: Option<&Path>,
         object: &crate::core::quartz_domain::QuartzObjectBlueprint,
-        rect: Rect,
+        _rect: Rect,
+        quad: [Pos2; 4],
         tint: Color32,
     ) -> bool {
         if object.visual_asset_mode == ObjectVisualAssetMode::None {
@@ -2230,12 +2424,19 @@ impl QuartzForgeApp {
             }
         };
 
-        painter.image(
-            texture_id,
-            rect,
-            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-            tint,
-        );
+        let mut mesh = egui::epaint::Mesh::with_texture(texture_id);
+        let base = mesh.vertices.len() as u32;
+        for (pos, uv) in quad.into_iter().zip([
+            Pos2::new(0.0, 0.0),
+            Pos2::new(1.0, 0.0),
+            Pos2::new(1.0, 1.0),
+            Pos2::new(0.0, 1.0),
+        ]) {
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: tint });
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        painter.add(egui::Shape::mesh(mesh));
         true
     }
 
@@ -2287,6 +2488,41 @@ impl QuartzForgeApp {
             scene_source_file.to_owned()
         } else {
             configured.to_owned()
+        }
+    }
+
+    fn component_module_path_attr(scene_source_file: &str, target_file: &str) -> String {
+        let scene_dir = Path::new(scene_source_file)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        let target_path = Path::new(target_file);
+
+        let from_components = scene_dir.components().collect::<Vec<_>>();
+        let to_components = target_path.components().collect::<Vec<_>>();
+
+        let mut shared_prefix_len = 0usize;
+        while shared_prefix_len < from_components.len()
+            && shared_prefix_len < to_components.len()
+            && from_components[shared_prefix_len] == to_components[shared_prefix_len]
+        {
+            shared_prefix_len += 1;
+        }
+
+        let mut parts = Vec::new();
+        for _ in shared_prefix_len..from_components.len() {
+            parts.push("..".to_owned());
+        }
+        for component in to_components.iter().skip(shared_prefix_len) {
+            parts.push(component.as_os_str().to_string_lossy().replace('\\', "/"));
+        }
+
+        if parts.is_empty() {
+            Path::new(target_file)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| target_file.replace('\\', "/"))
+        } else {
+            parts.join("/")
         }
     }
 
@@ -2358,7 +2594,8 @@ impl QuartzForgeApp {
         let mut out = String::new();
         out.push_str("use quartz::prelude::*;\n");
         for (target, module_name) in &external_modules {
-            out.push_str(&format!("#[path = \"{}\"]\nmod {};\n", target, module_name));
+            let module_path = Self::component_module_path_attr(scene_source_file, target);
+            out.push_str(&format!("#[path = \"{}\"]\nmod {};\n", module_path, module_name));
             out.push_str(&format!("use {}::*;\n", module_name));
         }
         if !external_modules.is_empty() {
@@ -2499,6 +2736,7 @@ impl QuartzForgeApp {
         out
     }
 
+    #[allow(dead_code)]
     fn build_component_module_source(&self, target_file: &str) -> Option<String> {
         let scene = self
             .project_state
@@ -3313,44 +3551,7 @@ impl QuartzForgeApp {
     }
 
     fn track_manual_override_for_file(&mut self, rel_path: &str, content: &str) {
-        if let Some(scene) = self
-            .project_state
-            .manifest
-            .scenes
-            .get_mut(self.project_state.active_scene_index)
-        {
-            if let Some(existing) = scene
-                .custom_code_blocks
-                .iter_mut()
-                .find(|b| b.kind == CustomCodeKind::ManualFileOverride && b.output_file == rel_path)
-            {
-                existing.code = content.to_owned();
-                existing.name = format!("manual_override_{}", rel_path.replace('/', "_"));
-                self.project_state.dirty = true;
-                return;
-            }
-        }
-
-        let (id, name) = self
-            .project_state
-            .manifest
-            .next_custom_code_identity(CustomCodeKind::ManualFileOverride);
-        let mut block = crate::core::quartz_domain::CustomCodeBlock::new(
-            id,
-            name,
-            CustomCodeKind::ManualFileOverride,
-            rel_path.to_owned(),
-        );
-        block.code = content.to_owned();
-        if let Some(scene) = self
-            .project_state
-            .manifest
-            .scenes
-            .get_mut(self.project_state.active_scene_index)
-        {
-            scene.custom_code_blocks.push(block);
-            self.project_state.dirty = true;
-        }
+        let _ = self.project_state.track_manual_override_for_file(rel_path, content);
     }
 
     fn collect_editable_files(root: &Path) -> Vec<String> {
@@ -3610,6 +3811,23 @@ impl QuartzForgeApp {
                 &mut object.visual_asset_path,
             );
         }
+        if object.visual_asset_mode == ObjectVisualAssetMode::StaticImage {
+            changed |= ui
+                .checkbox(&mut object.visual_asset_use_canvas_cache, "use Canvas image cache")
+                .changed();
+            if object.visual_asset_use_canvas_cache {
+                ui.label("Cache Key (blank defaults to asset path)");
+                changed |= ui
+                    .text_edit_singleline(&mut object.visual_asset_cache_key)
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut object.visual_asset_size_aware_cache,
+                        "include object size in cache key",
+                    )
+                    .changed();
+            }
+        }
         if object.visual_asset_mode == ObjectVisualAssetMode::AnimatedSprite {
             changed |= ui
                 .add(Slider::new(&mut object.visual_asset_fps, 1.0..=60.0).text("animation fps"))
@@ -3867,6 +4085,9 @@ impl QuartzForgeApp {
             Ok(state) => {
                 self.project_state = state;
                 self.project_root = Some(path.clone());
+                self.quartz_preview = self.build_scene_source();
+                self.project_sync_report = None;
+                self.show_project_sync_prompt = false;
                 self.status_line = format!("Created project at {}", path.display());
             }
             Err(err) => {
@@ -3880,11 +4101,24 @@ impl QuartzForgeApp {
             return;
         };
 
-        match persistence::load_project(&path) {
-            Ok(state) => {
+        match persistence::load_project_with_sync(&path) {
+            Ok((state, report)) => {
                 self.project_state = state;
                 self.project_root = Some(path.clone());
-                self.status_line = format!("Loaded project from {}", path.display());
+                self.quartz_preview = self.build_scene_source();
+                self.show_project_sync_prompt = report.needs_user_action();
+                self.project_sync_report = if report.needs_user_action() {
+                    Some(report.clone())
+                } else {
+                    None
+                };
+                if matches!(report.status, persistence::ProjectSyncStatus::MissingSnapshot) {
+                    self.status_line = format!("Loaded project from {}. {}", path.display(), report.summary);
+                } else if report.needs_user_action() {
+                    self.status_line = format!("Loaded project from {}. {}", path.display(), report.summary);
+                } else {
+                    self.status_line = format!("Loaded project from {}", path.display());
+                }
             }
             Err(err) => {
                 self.status_line = format!("Open project failed: {err}");
@@ -3901,6 +4135,17 @@ impl QuartzForgeApp {
         match persistence::save_project(&mut self.project_state, &root) {
             Ok(()) => {
                 self.status_line = format!("Saved project to {}", root.display());
+                if let Ok(report) = persistence::validate_project_sync(&self.project_state, &root) {
+                    if report.needs_user_action() {
+                        self.project_sync_report = Some(report.clone());
+                        self.show_project_sync_prompt = true;
+                        self.status_line = format!(
+                            "Saved project to {}. {}",
+                            root.display(),
+                            report.summary
+                        );
+                    }
+                }
             }
             Err(err) => {
                 self.status_line = format!("Save failed: {err}");
@@ -3932,79 +4177,45 @@ impl QuartzForgeApp {
         self.status_line = "Preview process stopped.".to_owned();
     }
 
-    fn write_generated_script(&mut self) {
-        let Some(root) = self.project_root.clone() else {
-            self.status_line = "Open a project before writing generated script.".to_owned();
-            return;
-        };
+    #[allow(dead_code)]
+    fn write_generated_files_for_scene(&mut self, root: &Path, scene_index: usize) -> Result<()> {
+        let original_scene_index = self.project_state.active_scene_index;
+        self.project_state.active_scene_index = scene_index;
 
-        if let Err(err) = persistence::ensure_runtime_scaffold(&self.project_state, &root) {
-            self.status_line = format!("Failed to prepare runtime scaffold: {err}");
-            return;
-        }
+        let result = (|| -> Result<()> {
+            let scene = self
+                .project_state
+                .manifest
+                .scenes
+                .get(scene_index)
+                .cloned()
+                .ok_or_else(|| anyhow!("missing scene at index {scene_index}"))?;
 
-        if self.quartz_preview.trim().is_empty() {
-            self.quartz_preview = self.build_scene_source();
-        }
+            let configured_rel = scene.source_file.trim().to_owned();
+            let fallback_rel = format!("scripts/{}", codegen::generated_file_name(&self.project_state));
+            let rel_path = if configured_rel.is_empty() { fallback_rel } else { configured_rel };
 
-        let configured_rel = self
-            .project_state
-            .manifest
-            .scenes
-            .get(self.project_state.active_scene_index)
-            .map(|s| s.source_file.trim().to_owned())
-            .unwrap_or_default();
-        let fallback_rel = format!(
-            "scripts/{}",
-            codegen::generated_file_name(&self.project_state)
-        );
-        let rel_path = if configured_rel.is_empty() {
-            fallback_rel
-        } else {
-            configured_rel
-        };
-
-        let out_path = root.join(&rel_path);
-        if let Some(parent) = out_path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                self.status_line = format!("Failed to prepare output directory: {err}");
-                return;
+            let out_path = root.join(&rel_path);
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to prepare output directory {}", parent.display()))?;
             }
-        }
-        self.quartz_preview = self.build_scene_source();
-        let scene_override = self
-            .project_state
-            .manifest
-            .scenes
-            .get(self.project_state.active_scene_index)
-            .and_then(|scene| {
-                scene
-                    .custom_code_blocks
-                    .iter()
-                    .find(|b| {
-                        b.kind == CustomCodeKind::ManualFileOverride
-                            && b.output_file.trim() == rel_path
-                            && !b.code.trim().is_empty()
-                    })
-                    .map(|b| b.code.clone())
-            });
-        let scene_output = scene_override.unwrap_or_else(|| self.quartz_preview.clone());
 
-        match std::fs::write(&out_path, scene_output) {
-            Ok(()) => {
-                self.status_line = format!("Generated Quartz script written to {}", out_path.display());
-            }
-            Err(err) => {
-                self.status_line = format!("Failed to write generated script: {err}");
-            }
-        }
+            let scene_output_generated = self.build_scene_source();
+            let scene_override = scene
+                .custom_code_blocks
+                .iter()
+                .find(|b| {
+                    b.kind == CustomCodeKind::ManualFileOverride
+                        && b.output_file.trim() == rel_path
+                        && !b.code.trim().is_empty()
+                })
+                .map(|b| b.code.clone());
+            let scene_output = scene_override.unwrap_or(scene_output_generated);
 
-        if let Some(scene) = self
-            .project_state
-            .manifest
-            .scenes
-            .get(self.project_state.active_scene_index)
-        {
+            std::fs::write(&out_path, scene_output)
+                .with_context(|| format!("failed to write generated scene file {}", out_path.display()))?;
+
             let scene_source_file = scene.source_file.trim().to_owned();
             let mut target_files: Vec<String> = Vec::new();
             for object in &scene.objects {
@@ -4053,18 +4264,238 @@ impl QuartzForgeApp {
                     })
                     .map(|b| b.code.clone());
 
-                if let Some(module_source) = module_override.or_else(|| self.build_component_module_source(&target_file)) {
+                if let Some(module_source) =
+                    module_override.or_else(|| self.build_component_module_source(&target_file))
+                {
                     let module_path = root.join(&target_file);
                     if let Some(parent) = module_path.parent() {
-                        if let Err(err) = std::fs::create_dir_all(parent) {
-                            self.status_line = format!("Failed to prepare component directory: {err}");
-                            continue;
-                        }
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("failed to prepare component directory {}", parent.display())
+                        })?;
                     }
-                    if let Err(err) = std::fs::write(&module_path, module_source) {
-                        self.status_line = format!("Failed to write component file {}: {err}", module_path.display());
+                    std::fs::write(&module_path, module_source).with_context(|| {
+                        format!("failed to write component file {}", module_path.display())
+                    })?;
+                }
+            }
+
+            Ok(())
+        })();
+
+        self.project_state.active_scene_index = original_scene_index;
+        self.quartz_preview = self.build_scene_source();
+        result
+    }
+
+    fn write_all_generated_files_from_project_state(&mut self) {
+        let Some(root) = self.project_root.clone() else {
+            self.status_line = "Open a project before writing generated script.".to_owned();
+            return;
+        };
+
+        if let Err(err) = persistence::ensure_runtime_scaffold(&self.project_state, &root) {
+            self.status_line = format!("Failed to prepare runtime scaffold: {err}");
+            return;
+        }
+
+        if let Err(err) = project_sync::write_all_generated_files_from_state(&self.project_state, &root) {
+            self.status_line = format!("Failed to write generated files: {err}");
+            return;
+        }
+
+        if let Err(err) = persistence::save_project(&mut self.project_state, &root) {
+            self.status_line = format!("Generated files written, but auto-save failed: {err}");
+            return;
+        }
+
+        if let Err(err) = persistence::write_sync_snapshot(&self.project_state, &root) {
+            self.status_line = format!("Generated files and project saved, but sync snapshot failed: {err}");
+            return;
+        }
+
+        match persistence::validate_project_sync(&self.project_state, &root) {
+            Ok(report) => {
+                self.project_sync_report = if report.needs_user_action() {
+                    Some(report.clone())
+                } else {
+                    None
+                };
+                self.show_project_sync_prompt = report.needs_user_action();
+                self.status_line = format!(
+                    "Generated files written for all scenes and project auto-saved to {}.",
+                    root.display()
+                );
+            }
+            Err(err) => {
+                self.status_line = format!(
+                    "Generated files written and project auto-saved, but sync validation failed: {err}"
+                );
+            }
+        }
+    }
+
+    fn write_generated_script(&mut self) {
+        self.write_all_generated_files_from_project_state();
+    }
+
+    fn restore_project_state_from_last_export(&mut self) {
+        let Some(root) = self.project_root.clone() else {
+            self.status_line = "Open a project before reconciling project sync.".to_owned();
+            return;
+        };
+
+        match persistence::restore_project_from_sync_snapshot(&root) {
+            Ok(state) => {
+                self.project_state = state;
+                self.quartz_preview = self.build_scene_source();
+                match persistence::save_project(&mut self.project_state, &root) {
+                    Ok(()) => {
+                        self.project_sync_report = None;
+                        self.show_project_sync_prompt = false;
+                        self.status_line = "Restored project save state from the last exported Quartz Forge file snapshot.".to_owned();
+                    }
+                    Err(err) => {
+                        self.status_line = format!("Restored snapshot state in memory, but saving failed: {err}");
                     }
                 }
+            }
+            Err(err) => {
+                self.status_line = format!("Failed to restore project from sync snapshot: {err}");
+            }
+        }
+    }
+
+    fn import_files_as_manual_overrides(&mut self, rel_paths: &[String]) {
+        let Some(root) = self.project_root.clone() else {
+            self.status_line = "Open a project before importing manual overrides.".to_owned();
+            return;
+        };
+
+        let mut imported = Vec::new();
+        let mut failed = Vec::new();
+        for rel_path in rel_paths {
+            let path = root.join(rel_path);
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    if self.project_state.track_manual_override_for_file(rel_path, &content).is_some() {
+                        imported.push(rel_path.clone());
+                    } else {
+                        failed.push(format!("{rel_path} (no owning scene could be resolved)"));
+                    }
+                }
+                Err(err) => {
+                    failed.push(format!("{rel_path} ({err})"));
+                }
+            }
+        }
+
+        if imported.is_empty() {
+            self.status_line = if failed.is_empty() {
+                "No files were imported as manual overrides.".to_owned()
+            } else {
+                format!("Failed to import manual overrides: {}", failed.join(", "))
+            };
+            return;
+        }
+
+        if let Err(err) = persistence::save_project(&mut self.project_state, &root) {
+            self.status_line = format!("Imported overrides in memory, but saving project failed: {err}");
+            return;
+        }
+
+        if let Err(err) = persistence::write_sync_snapshot(&self.project_state, &root) {
+            self.status_line = format!("Imported overrides, but sync snapshot failed: {err}");
+            return;
+        }
+
+        match persistence::validate_project_sync(&self.project_state, &root) {
+            Ok(report) => {
+                self.project_sync_report = if report.needs_user_action() {
+                    Some(report.clone())
+                } else {
+                    None
+                };
+                self.show_project_sync_prompt = report.needs_user_action();
+                self.status_line = if failed.is_empty() {
+                    format!(
+                        "Imported {} file(s) as ManualFileOverride and saved the project.",
+                        imported.len()
+                    )
+                } else {
+                    format!(
+                        "Imported {} file(s) as ManualFileOverride; some files failed: {}",
+                        imported.len(),
+                        failed.join(", ")
+                    )
+                };
+            }
+            Err(err) => {
+                self.status_line = format!("Imported overrides, but sync validation failed: {err}");
+            }
+        }
+    }
+
+    fn import_files_semantically(&mut self, rel_paths: &[String]) {
+        let Some(root) = self.project_root.clone() else {
+            self.status_line = "Open a project before running semantic import.".to_owned();
+            return;
+        };
+
+        match project_import::import_files_into_state(&mut self.project_state, &root, rel_paths, true) {
+            Ok(report) => {
+                if let Err(err) = persistence::save_project(&mut self.project_state, &root) {
+                    self.status_line = format!("Semantic import succeeded in memory, but saving project failed: {err}");
+                    return;
+                }
+                if let Err(err) = persistence::write_sync_snapshot(&self.project_state, &root) {
+                    self.status_line = format!("Semantic import saved project, but sync snapshot failed: {err}");
+                    return;
+                }
+                match persistence::validate_project_sync(&self.project_state, &root) {
+                    Ok(sync_report) => {
+                        self.project_sync_report = if sync_report.needs_user_action() {
+                            Some(sync_report.clone())
+                        } else {
+                            None
+                        };
+                        self.show_project_sync_prompt = sync_report.needs_user_action();
+                        self.quartz_preview = self.build_scene_source();
+                    }
+                    Err(err) => {
+                        self.status_line = format!("Semantic import saved project, but sync validation failed: {err}");
+                        return;
+                    }
+                }
+
+                let mut parts = Vec::new();
+                if !report.imported_files.is_empty() {
+                    parts.push(format!(
+                        "semantically imported {} file(s), {} object(s), {} custom block(s)",
+                        report.imported_files.len(),
+                        report.imported_object_count,
+                        report.imported_custom_block_count
+                    ));
+                }
+                if !report.fallback_manual_override_files.is_empty() {
+                    parts.push(format!(
+                        "fell back to ManualFileOverride for {} file(s)",
+                        report.fallback_manual_override_files.len()
+                    ));
+                }
+                if !report.unsupported_files.is_empty() {
+                    parts.push(format!(
+                        "left {} file(s) unsupported",
+                        report.unsupported_files.len()
+                    ));
+                }
+                if parts.is_empty() {
+                    self.status_line = "Semantic import made no project-state changes.".to_owned();
+                } else {
+                    self.status_line = format!("Semantic import: {}.", parts.join(", "));
+                }
+            }
+            Err(err) => {
+                self.status_line = format!("Semantic import failed: {err}");
             }
         }
     }
@@ -4148,6 +4579,29 @@ impl QuartzForgeApp {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::QuartzForgeApp;
+
+    #[test]
+    fn component_module_path_attr_steps_out_of_scene_directory() {
+        let actual = QuartzForgeApp::component_module_path_attr(
+            "src/scripts/main_scene_scene.rs",
+            "src/game_state.rs",
+        );
+        assert_eq!(actual, "../game_state.rs");
+    }
+
+    #[test]
+    fn component_module_path_attr_preserves_nested_targets() {
+        let actual = QuartzForgeApp::component_module_path_attr(
+            "src/scripts/main_scene_scene.rs",
+            "src/scripts/components/shared.rs",
+        );
+        assert_eq!(actual, "components/shared.rs");
+    }
+}
+
 impl eframe::App for QuartzForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hot_reload.poll();
@@ -4188,6 +4642,81 @@ impl eframe::App for QuartzForgeApp {
                         self.show_startup_prompt = false;
                     }
                 });
+        }
+
+        if self.show_project_sync_prompt {
+            if let Some(report) = self.project_sync_report.clone() {
+                egui::Window::new("Project Sync Reconciliation")
+                    .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(620.0)
+                    .show(ctx, |ui| {
+                        ui.label(&report.summary);
+                        if let Some(generated_at) = &report.snapshot_generated_at_utc {
+                            ui.label(format!("Last exported sync snapshot: {generated_at}"));
+                        }
+                        ui.separator();
+                        if !report.modified_files.is_empty() {
+                            ui.label("Modified tracked files:");
+                            for path in &report.modified_files {
+                                ui.label(format!("- {path}"));
+                            }
+                        }
+                        if !report.missing_files.is_empty() {
+                            ui.label("Missing tracked files:");
+                            for path in &report.missing_files {
+                                ui.label(format!("- {path}"));
+                            }
+                        }
+                        if !report.extra_files.is_empty() {
+                            ui.label("Extra tracked files not present in the last export snapshot:");
+                            for path in &report.extra_files {
+                                ui.label(format!("- {path}"));
+                            }
+                        }
+                        ui.separator();
+                        ui.label(
+                            "Use ManualFileOverride tracking for user-owned Rust edits you want Quartz Forge to preserve across regeneration. Untracked Rust edits cannot be imported back into scene/object/event data automatically.",
+                        );
+                        ui.separator();
+                        let importable_files = report
+                            .modified_files
+                            .iter()
+                            .chain(report.extra_files.iter())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        ui.horizontal_wrapped(|ui| {
+                            if report.can_restore_project_from_last_export
+                                && ui.button("Update Project Save State To Match Last Exported Files").clicked()
+                            {
+                                self.restore_project_state_from_last_export();
+                            }
+                            if report.can_rewrite_files_from_project
+                                && ui.button("Update Files To Match Project Save State").clicked()
+                            {
+                                self.write_all_generated_files_from_project_state();
+                            }
+                            if !importable_files.is_empty()
+                                && ui.button("Semantic Import Changed Files").clicked()
+                            {
+                                self.import_files_semantically(&importable_files);
+                            }
+                            if !importable_files.is_empty()
+                                && ui.button("Import Changed Files As Manual Overrides").clicked()
+                            {
+                                self.import_files_as_manual_overrides(&importable_files);
+                            }
+                            if ui.button("Continue Without Reconciling").clicked() {
+                                self.show_project_sync_prompt = false;
+                                self.status_line = format!(
+                                    "Continuing with unresolved project sync warning: {}",
+                                    report.summary
+                                );
+                            }
+                        });
+                    });
+            }
         }
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {

@@ -53,7 +53,7 @@ impl ProjectManifest {
 
     pub fn ensure_default_scene(&mut self) {
         if self.scenes.is_empty() {
-            let scene = self.make_scene("main_scene".to_owned(), SceneKind::Game);
+            let scene = self.make_scene("main".to_owned(), SceneKind::Game);
             self.active_scene_id = Some(scene.id.clone());
             self.scenes.push(scene);
         }
@@ -62,7 +62,7 @@ impl ProjectManifest {
     pub fn make_scene(&mut self, name: String, kind: SceneKind) -> SceneDocument {
         let id = format!("scene_{:04}", self.next_scene_id);
         self.next_scene_id += 1;
-        let source_file = format!("src/scripts/{}_scene.rs", name.replace(' ', "_").to_lowercase());
+        let source_file = format!("src/scenes/{}_scene.rs", canonical_scene_slug(&name));
         SceneDocument {
             id,
             name,
@@ -114,6 +114,18 @@ impl ProjectManifest {
     pub fn active_scene_index(&self) -> Option<usize> {
         let active_id = self.active_scene_id.as_deref()?;
         self.scenes.iter().position(|s| s.id == active_id)
+    }
+}
+
+fn canonical_scene_slug(name: &str) -> String {
+    let mut slug = name.trim().replace(' ', "_").to_lowercase();
+    while slug.ends_with("_scene") {
+        slug.truncate(slug.len().saturating_sub("_scene".len()));
+    }
+    if slug.is_empty() {
+        "scene".to_owned()
+    } else {
+        slug
     }
 }
 
@@ -353,6 +365,69 @@ impl EditorProjectState {
             self.dirty = true;
         }
     }
+
+    pub fn preferred_scene_index_for_file(&self, rel_path: &str) -> Option<usize> {
+        let rel_path = rel_path.trim();
+        if rel_path.is_empty() || self.manifest.scenes.is_empty() {
+            return None;
+        }
+
+        let mut matches = Vec::new();
+        for (idx, scene) in self.manifest.scenes.iter().enumerate() {
+            let scene_matches = scene.source_file == rel_path
+                || scene.objects.iter().any(|obj| obj.output_file == rel_path)
+                || scene.logic_trees.iter().any(|tree| tree.output_file == rel_path)
+                || scene.events.iter().any(|event| event.output_file == rel_path)
+                || scene.custom_code_blocks.iter().any(|block| block.output_file == rel_path);
+
+            if scene_matches {
+                matches.push(idx);
+            }
+        }
+
+        if matches.is_empty() {
+            Some(self.active_scene_index.min(self.manifest.scenes.len().saturating_sub(1)))
+        } else if matches.contains(&self.active_scene_index) {
+            Some(self.active_scene_index)
+        } else {
+            matches.into_iter().next()
+        }
+    }
+
+    pub fn track_manual_override_for_file(&mut self, rel_path: &str, content: &str) -> Option<usize> {
+        let scene_index = self.preferred_scene_index_for_file(rel_path)?;
+
+        if let Some(scene) = self.manifest.scenes.get_mut(scene_index) {
+            if let Some(existing) = scene
+                .custom_code_blocks
+                .iter_mut()
+                .find(|b| b.kind == CustomCodeKind::ManualFileOverride && b.output_file == rel_path)
+            {
+                existing.code = content.to_owned();
+                existing.name = format!("manual_override_{}", rel_path.replace('/', "_"));
+                self.dirty = true;
+                return Some(scene_index);
+            }
+        }
+
+        let (id, name) = self
+            .manifest
+            .next_custom_code_identity(CustomCodeKind::ManualFileOverride);
+        let mut block = CustomCodeBlock::new(
+            id,
+            name,
+            CustomCodeKind::ManualFileOverride,
+            rel_path.to_owned(),
+        );
+        block.code = content.to_owned();
+        if let Some(scene) = self.manifest.scenes.get_mut(scene_index) {
+            scene.custom_code_blocks.push(block);
+            self.dirty = true;
+            Some(scene_index)
+        } else {
+            None
+        }
+    }
 }
 
 fn default_next_object_id() -> u32 {
@@ -401,4 +476,51 @@ fn default_custom_code_blocks() -> Vec<CustomCodeBlock> {
 
 fn default_scene_view_bookmarks() -> Vec<SceneViewBookmark> {
     vec![SceneViewBookmark::home_background_cell()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditorProjectState;
+
+    #[test]
+    fn track_manual_override_prefers_active_scene_match() {
+        let mut state = EditorProjectState::new("test_project".to_owned());
+        state.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+
+        let scene = state.manifest.make_scene("menu".to_owned(), super::SceneKind::Ui);
+        state.manifest.active_scene_id = Some(scene.id.clone());
+        state.manifest.scenes.push(scene);
+        state.active_scene_index = 1;
+        state.manifest.scenes[1].source_file = "src/scripts/menu_scene.rs".to_owned();
+
+        let tracked = state.track_manual_override_for_file(
+            "src/scripts/menu_scene.rs",
+            "pub fn custom_menu_bits() {}",
+        );
+
+        assert_eq!(tracked, Some(1));
+        assert!(state.manifest.scenes[1]
+            .custom_code_blocks
+            .iter()
+            .any(|block| block.output_file == "src/scripts/menu_scene.rs" && block.code.contains("custom_menu_bits")));
+    }
+
+    #[test]
+    fn track_manual_override_updates_existing_block() {
+        let mut state = EditorProjectState::new("test_project".to_owned());
+        let rel = "src/scripts/main_scene.rs";
+
+        let first = state.track_manual_override_for_file(rel, "one");
+        let second = state.track_manual_override_for_file(rel, "two");
+
+        assert_eq!(first, Some(0));
+        assert_eq!(second, Some(0));
+        let overrides = state.manifest.scenes[0]
+            .custom_code_blocks
+            .iter()
+            .filter(|block| block.output_file == rel)
+            .collect::<Vec<_>>();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].code, "two");
+    }
 }

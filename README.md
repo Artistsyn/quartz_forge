@@ -1,140 +1,71 @@
 # Quartz Forge
 
-Quartz Forge is the next-generation Quartz 2D game development suite for FlowMake.
-
-## Mission
-
-Build a modular, production-grade editor that supports:
-
-- Full scene and multi-level authoring
-- Game logic authoring with Quartz-native Action/Event semantics
-- Plugin-aware tooling (Quartz plugins + project plugins)
-- In-editor preview and hot-reload workflow
-- Structured project filesystem and deterministic export
-- Future PathForge and sprite/animation tooling integration
-
-## Current Foundation (Phase 0)
-
-This crate now includes:
-
-- eframe/egui shell with split editor layout
-- explicit `eframe::Renderer::Wgpu` backend for GPU-accelerated editor rendering
-- Project creation/load/save for `project.qforge.json`
-- Standardized project directory layout:
-  - `scenes/`
-  - `scripts/`
-  - `assets/images`, `assets/audio`, `assets/fonts`, `assets/data`
-  - `build/`
-  - `.quartz_forge/`
-- Scene list management (add/remove/select)
-- Scene inspector fields (name, source file, notes)
-- Scene canvas translation contract controls (zoom/pan/virtual resolution probe)
-- Object blueprint authoring with toggleable advanced parameter panels to reduce clutter
-- Object physics material authoring with Quartz/crystalline presets and custom elasticity/friction/density controls
-- Branching update-script authoring (exported as `canvas.on_update` action chains) with tracked referenced object ids
-- Event binding authoring panel aligned to Quartz `GameEvent` shapes (key/mouse/collision/tick/custom)
-- Expanded Quartz action mapping in editor/codegen (momentum, gravity, rotation, size, zoom, plugin call stubs)
-- Update-script to event-link integration: linked update scripts generate Quartz `Action::Conditional` / `Action::Multi` payloads for event actions
-- Conditional action variant available in the action editor (with editable condition tree)
-- Generated Quartz syntax preview and one-click script write to `scripts/*_generated.rs`
-- Interactive visual scene canvas editing:
-  - Mouse drag to move objects
-  - Corner-handle drag to resize objects
-  - Grid snap mode for object move/resize alignment
-  - Per-object transform lock to prevent accidental edits
-  - Circle template rendered as true circle visualization in-canvas
-  - Camera frame overlay + camera-anchored object visualization
-  - Explicit object space mode designation: world-space (default) or camera-space pinned
-  - Optional undocked, resizable scene canvas window
-  - Optional dedicated camera view window
-  - Mouse pan (middle/right drag) and wheel zoom centered on cursor
-  - Layer-ordered rendering in scene/camera views for front/back composition checks
-  - Arrow-key nudging (Shift for larger step)
-  - New objects snap their top-left corner to the grid when grid snapping is enabled
-  - Immediate Quartz syntax preview refresh on object/logic edits
-- All major editor regions are scrollable and panel windows are resizable to avoid hidden controls (with explicit scroll IDs to prevent duplicate-ID UI warnings)
-- App authoring code is now split into focused modules for safer iteration:
-  - `app/editors.rs` for action + target editors
-  - `app/condition_editor.rs` for condition editing
-  - `app/logic_events_editor.rs` for update-script and event authoring panels
-- Preview service boundary (start/stop/poll external `cargo run` process)
-
-## GPU Responsiveness Contract
-
-Quartz Forge is GPU-first from the editor side, even before full Quartz runtime GPU parity:
-
-- Editor shell renders on WGPU backend, not software fallback.
-- UI update loop targets interactive refresh cadence (currently ~60 Hz pacing).
-- Heavy viewport work should land in GPU-rendered passes with CPU-side culling/data prep.
-- Avoid blocking UI thread with compile/export/process orchestration.
-
-## Architectural Direction
-
-Quartz Forge is intentionally structured to avoid `quartz_game_editor` drift:
-
-- Explicit domain models (`core/project.rs`) rather than ad-hoc UI state blobs
-- Isolated services (`services/persistence.rs`, `services/hot_reload.rs`) for IO and process orchestration
-- UI as orchestration layer, not source of truth
-- Versioned project manifest for migration-safe evolution
-# Quartz Forge
-
-Quartz Forge is a Quartz-native authoring environment inside the FlowMake workspace. It is designed to bridge visual scene editing, gameplay logic authoring, custom Rust blocks, and deterministic Quartz export without drifting away from the real engine API.
+Quartz Forge is a Quartz-native authoring environment inside the FlowMake workspace. Its job is to help humans and AI agents build real Quartz 2D game projects through source-backed scene editing, Quartz-native code generation, local API verification, and MCP-assisted workflows.
 
 ## What Quartz Forge Is For
 
-Quartz Forge exists to help you build real Quartz games faster, with less guesswork between editor state and runtime code.
+Quartz Forge is meant to keep editor intent and runtime code close together.
 
-| Goal | What that means in practice |
+| Goal | What it means |
 | --- | --- |
-| Quartz-native authoring | Objects, events, actions, and generated code stay close to `quartz::prelude::*` concepts. |
-| Editor-to-runtime continuity | The scene canvas, action editors, generated preview, and custom code tools all point toward shippable Rust output. |
-| Workspace-aware tooling | Quartz Forge assumes the FlowMake monorepo layout and can validate against local Quartz source and API docs. |
-| Faster iteration | Visual editing, preview generation, hot-reload hooks, and MCP lookup tools reduce back-and-forth between files and runtime behavior. |
+| Quartz-native authoring | Generated output stays aligned with `quartz::prelude::*`, Quartz `Action` and `Condition` semantics, and local engine reality. |
+| AI-assisted project building | Copilot and other agents should be able to use quartz_forge and its MCP tools to generate, extend, and maintain new Quartz game projects without inventing off-model engine syntax. |
+| Editor-to-runtime continuity | Scene layout, object settings, actions, events, custom code blocks, and generated files all point toward shippable Rust output. |
+| Workspace-aware validation | Quartz Forge validates against local Quartz source, local api.txt, and quartz_forge's own coverage so agents can route work through real supported surfaces. |
 
 ## Core Capabilities
 
 ### Visual Scene Authoring
 
 - Interactive scene canvas with drag, resize, rotate, pan, zoom, grid snap, arrow-key nudging, and layer-ordered rendering.
-- Optional undocked scene canvas and dedicated camera-view window for composition checks.
-- Object authoring for rectangles, circles, spawn-only templates, background objects, visual assets, transform locks, and camera-space pinned objects.
-- Background-cell overlays, camera frame overlays, pivot visualization, and ghost rendering for spawn-only objects.
+- Object authoring for rectangles, circles, spawn-only templates, background objects, static images, and animated sprites.
+- Camera-space pinning, pivot visualization, background-cell overlays, camera frame overlays, and spawn ghost overlays.
+- Rotated asset previews now follow the object's rotation parameter in the editor, matching expected Quartz runtime behavior.
 
-### Logic and Gameplay Authoring
+### Logic, Events, and Code Generation
 
 - Update-script authoring that exports Quartz-native `canvas.on_update(...)` logic.
 - Event builder aligned with Quartz event shapes such as key, mouse, collision, tick, and custom event flows.
-- Action editing for movement, camera effects, plugin calls, conditions, grouped actions, spawn actions, variable ops, and text updates.
-- Custom code windows for constants, game state, typed vars, custom events, update loops, and top-level code.
+- Action editing for movement, camera effects, plugin calls, grouped actions, conditional actions, variable ops, spawn actions, and text updates.
+- Generated Quartz syntax preview plus one-click script write to generated Rust files.
 
-### Export, Preview, and Runtime Support
+### Multi-File Project Support
 
-- Generated Quartz syntax preview for the active scene.
-- One-click script write to generated Rust files.
-- Project creation, load, and save for `project.qforge.json`.
-- Preview service boundary for starting, stopping, and polling an external `cargo run` preview process.
-- Generated-file browser for inspecting and manually editing emitted workspace files.
+- Scene parts can target external files instead of a single monolithic scene source.
+- Quartz Forge already auto-emits `#[path = "..."] mod ...;` and `use module::*;` lines for generated scene composition when objects, events, logic trees, or custom code blocks live in separate target files.
+- This keeps generated Rust syntactically valid without asking users or agents to hand-wire basic module imports for supported quartz_forge output paths.
 
-### MCP and Local Knowledge Tools
+### MCP and Agent Workflows
 
-- Dedicated `quartz_forge_mcp` server for local API lookup, snippet verification, parity checks, spawn audits, and text-pattern guidance.
-- Validation against local Quartz source and `quartz/api.txt`, not stale assumptions.
-- Text-authoring guidance based on the real `ball_swing_game` pattern now exposed through the MCP layer.
+- Dedicated `quartz_forge_mcp` server for local API lookup, snippet verification, parity checks, spawn audits, text guidance, and layout verification.
+- Intended to let Copilot or other agents interface with quartz_forge itself when creating or extending Quartz projects.
+- The MCP layer is meant to keep agent output Quartz-native, source-backed, and workspace-aware.
 
-## Product Intent
+## MCP Purpose
 
-Quartz Forge is not meant to become a detached no-code layer that invents its own game semantics.
+Quartz Forge MCP is not only a syntax search endpoint.
 
-Its intent is to:
+Its purpose is to help agents:
 
-- keep editor state directly translatable to Quartz code,
-- reduce API drift between authoring UI and engine reality,
-- provide enough visual tooling to speed up scene work without hiding the runtime model,
-- make custom code a first-class citizen instead of an escape hatch.
+- look up real Quartz API forms before generating code,
+- verify that proposed snippets match local Quartz and quartz_forge support,
+- understand text, spawn, and layout rules that quartz_forge already knows,
+- generate new project code using Quartz-native syntax instead of ad-hoc wrappers.
+
+### Current MCP tools
+
+| Tool | Purpose |
+| --- | --- |
+| `qf_api_lookup` | Search local Quartz API/source for exact native symbols and signatures. |
+| `qf_api_verify_snippet` | Validate snippets and warn about API drift or risky text patterns. |
+| `qf_text_knowledge` | Return Quartz Forge's preferred text construction and font-caching guidance. |
+| `qf_forge_check_parity` | Compare Quartz Forge support against Quartz action and condition enums. |
+| `qf_spawn_audit` | Inspect spawn-only workflow coverage and helper routing. |
+| `qf_project_lint_layout` | Report workspace layout expectations and generated multi-file module/use wiring. |
 
 ## Workspace Expectations
 
-Quartz Forge currently expects to run inside the FlowMake workspace root and to find sibling engine/editor data in predictable locations.
+Quartz Forge currently expects to run inside the FlowMake workspace root.
 
 Minimum expected layout:
 
@@ -146,7 +77,7 @@ FlowMake/
   .vscode/
 ```
 
-Important workspace assumptions:
+Important assumptions:
 
 - `quartz/api.txt` must exist.
 - `quartz/src/types/action.rs` and `quartz/src/types/condition.rs` must exist.
@@ -155,7 +86,7 @@ Important workspace assumptions:
 
 ## Quick Start
 
-### 1. Run the editor
+### Run the editor
 
 From the FlowMake root:
 
@@ -163,46 +94,37 @@ From the FlowMake root:
 cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge
 ```
 
-### 2. Open or create a project
+### Open or create a project
 
 - Launch Quartz Forge.
 - Create a new project or open an existing Quartz Forge project.
-- Use the scene canvas, object menu, and event builder to start authoring.
+- Use the scene canvas, object menu, event builder, and custom code windows to start authoring.
 
-### 3. Generate and inspect output
+### Generate and inspect output
 
 - Use the generated Quartz preview to inspect the current export shape.
 - Write generated files into your project scripts when ready.
-- Use the generated-file browser if you need to inspect or track manual edits.
+- Use the generated-file browser to inspect or track manual overrides.
 
 ## MCP Setup
 
-Quartz Forge includes a dedicated MCP server binary: `quartz_forge_mcp`.
+Quartz Forge includes a dedicated MCP binary: `quartz_forge_mcp`.
 
-### Health check
+Health check:
 
 ```powershell
 cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge_mcp -- --health
 ```
 
-### Start the MCP server over stdio
+Run over stdio:
 
 ```powershell
 cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge_mcp -- --stdio
 ```
 
-### Current MCP tools
+The FlowMake workspace `.vscode/mcp.json` can point VS Code at this server so chat agents can use the quartz_forge MCP surface directly.
 
-| Tool | Purpose |
-| --- | --- |
-| `qf_api_lookup` | Search local Quartz API/source for exact native symbols and signatures. |
-| `qf_api_verify_snippet` | Validate snippets and warn about API drift or risky text patterns. |
-| `qf_text_knowledge` | Return Quartz Forge's preferred text-construction rules and examples. |
-| `qf_forge_check_parity` | Compare Quartz Forge support against Quartz action/condition enums. |
-| `qf_spawn_audit` | Inspect spawn-only workflow coverage and helper routing. |
-| `qf_project_lint_layout` | Report local project/tool layout expectations. |
-
-## Text Authoring Guidance
+## Text Guidance
 
 Quartz Forge now follows the same text pattern found in `ball_swing_game`.
 
@@ -215,31 +137,25 @@ Preferred pattern:
 
 Avoid:
 
-- Treating `canvas.make_text(...)` as the main long-term pattern for generated code.
+- Treating `canvas.make_text(...)` as the main generated pattern when direct `Text::new` plus `Span::new` is available.
 - Creating text inside a `get_game_object_mut(...)` borrow.
 - Re-parsing the same font bytes every frame.
 
-## Design and Architecture Notes
+## Windowing Notes
+
+- The existing collapsible tool windows now dock into a fixed tray when collapsed so they stay easy to find without covering the workspace.
+- Restoring a docked window reopens it through the same egui window id, which preserves its prior position rather than snapping it to a fresh default.
+
+## Architecture Notes
 
 Quartz Forge is intentionally split into focused layers:
 
 - `src/app/` for egui orchestration and editor windows.
 - `src/core/` for project and Quartz-domain models.
-- `src/services/` for codegen, persistence, and preview/hot-reload support.
-- `src/mcp.rs` and `src/bin/quartz_forge_mcp.rs` for the workspace MCP server.
+- `src/services/` for code generation, persistence, and preview/hot-reload support.
+- `src/mcp.rs` and `src/bin/quartz_forge_mcp.rs` for the MCP server surface.
 
-This keeps UI concerns out of the source-of-truth model and makes it easier to validate codegen and MCP behavior against local Quartz APIs.
-
-## Current Status
-
-Quartz Forge is already useful for real scene and gameplay authoring, but it is still actively evolving.
-
-Current focus areas include:
-
-- deeper performance optimization for large editor sessions,
-- continued Quartz action/condition parity work,
-- stronger MCP-assisted authoring flows,
-- richer asset, plugin, and preview tooling.
+That separation keeps UI concerns out of the source-of-truth model and makes it easier for both humans and agents to validate generated Rust against local Quartz APIs.
 
 ## Runbook
 

@@ -2940,9 +2940,11 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "quote",
  "rfd",
  "serde",
  "serde_json",
+ "syn 2.0.117",
 ]
 
 [[package]]

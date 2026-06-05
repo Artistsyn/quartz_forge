@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 pub struct ProjectLayoutPaths {
     pub root: PathBuf,
     pub manifest_path: PathBuf,
+    pub sync_snapshot_path: PathBuf,
     pub scenes_dir: PathBuf,
     pub scripts_dir: PathBuf,
     pub resources_dir: PathBuf,
@@ -22,6 +23,7 @@ impl ProjectLayoutPaths {
         Self {
             root: root.to_path_buf(),
             manifest_path: root.join("project.qforge.json"),
+            sync_snapshot_path: root.join(".quartz_forge").join("sync_snapshot.json"),
             scenes_dir: root.join("src").join("scenes"),
             scripts_dir: root.join("src").join("scripts"),
             resources_dir: root.join("resources"),

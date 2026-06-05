@@ -7,6 +7,7 @@ use crate::core::quartz_domain::{
 };
 
 impl QuartzForgeApp {
+    #[allow(dead_code)]
     pub(super) fn logic_editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("Update Scripts (on_update)");
         let project_root = self.project_root.clone();

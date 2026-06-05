@@ -111,6 +111,12 @@ pub struct QuartzObjectBlueprint {
     pub visual_asset_path: String,
     #[serde(default = "default_visual_asset_fps")]
     pub visual_asset_fps: f32,
+    #[serde(default = "default_visual_asset_use_canvas_cache")]
+    pub visual_asset_use_canvas_cache: bool,
+    #[serde(default)]
+    pub visual_asset_cache_key: String,
+    #[serde(default = "default_visual_asset_size_aware_cache")]
+    pub visual_asset_size_aware_cache: bool,
     pub template: ObjectTemplate,
     pub x: f32,
     pub y: f32,
@@ -139,6 +145,9 @@ impl QuartzObjectBlueprint {
             visual_asset_mode: ObjectVisualAssetMode::None,
             visual_asset_path: String::new(),
             visual_asset_fps: default_visual_asset_fps(),
+            visual_asset_use_canvas_cache: default_visual_asset_use_canvas_cache(),
+            visual_asset_cache_key: String::new(),
+            visual_asset_size_aware_cache: default_visual_asset_size_aware_cache(),
             template: ObjectTemplate::Rectangle,
             x: 400.0,
             y: 300.0,
@@ -175,6 +184,14 @@ impl QuartzObjectBlueprint {
 
 fn default_visual_asset_fps() -> f32 {
     12.0
+}
+
+fn default_visual_asset_use_canvas_cache() -> bool {
+    true
+}
+
+fn default_visual_asset_size_aware_cache() -> bool {
+    true
 }
 
 fn default_settext_font_asset_path() -> String {
