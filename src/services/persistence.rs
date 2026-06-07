@@ -131,7 +131,7 @@ pub fn validate_project_sync(state: &EditorProjectState, root: &Path) -> Result<
     let Some(snapshot) = read_sync_snapshot(root)? else {
         return Ok(ProjectSyncReport {
             status: ProjectSyncStatus::MissingSnapshot,
-            summary: "No Quartz Forge sync snapshot exists yet. Export generated files once to establish reconciliation metadata.".to_owned(),
+            summary: "No Quartz Forge sync snapshot exists yet. Export generated files once to create the initial reconciliation snapshot.".to_owned(),
             modified_files: Vec::new(),
             missing_files: Vec::new(),
             extra_files: Vec::new(),
@@ -175,22 +175,22 @@ pub fn validate_project_sync(state: &EditorProjectState, root: &Path) -> Result<
     let (status, summary, can_restore_project_from_last_export) = match (manifest_matches_snapshot, files_match_snapshot) {
         (true, true) => (
             ProjectSyncStatus::InSync,
-            "Project save state matches the last exported Quartz Forge file set.".to_owned(),
+            "Project save state matches the last sync snapshot (captured from generated files).".to_owned(),
             false,
         ),
         (false, true) => (
             ProjectSyncStatus::SavedProjectAheadOfFiles,
-            "The saved project data differs from the last exported file set, but the tracked files still match the last export. You can rewrite files from the saved project state or restore the project save state to the last exported files.".to_owned(),
+            "The saved project data differs from the last sync snapshot, but tracked files still match that snapshot. You can rewrite files from the current save state or restore the save state to match the snapshot.".to_owned(),
             true,
         ),
         (true, false) => (
             ProjectSyncStatus::FilesChangedOutsideQuartzForge,
-            "Tracked project files changed outside the saved Quartz Forge project state. Review the mismatch before exporting again.".to_owned(),
+            "Tracked files changed outside the saved project state. Import those file changes into project save data, or rewrite files from the save state.".to_owned(),
             false,
         ),
         (false, false) => (
             ProjectSyncStatus::Diverged,
-            "The saved project data and tracked project files both diverged from the last exported sync point. Review the mismatch before continuing.".to_owned(),
+            "Saved project data and tracked files both diverged from the last sync snapshot. Choose whether to import file changes, rewrite files from save data, or restore save data from the snapshot.".to_owned(),
             false,
         ),
     };
@@ -359,8 +359,8 @@ fn ensure_cargo_toml(state: &EditorProjectState, root: &Path) -> Result<()> {
 
 fn ensure_main_rs(state: &EditorProjectState, root: &Path) -> Result<()> {
     let path = root.join("src").join("main.rs");
-    let crate_name = slugify_crate_name(&state.manifest.project_name);
-    let main_rs = managed_main_rs(&crate_name);
+    let _crate_name = slugify_crate_name(&state.manifest.project_name);
+    let main_rs = managed_main_rs();
 
     if path.exists() {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -410,33 +410,32 @@ fn active_scene_canvas_mode_expr(state: &EditorProjectState) -> &'static str {
     }
 }
 
-fn managed_main_rs(crate_name: &str) -> String {
+fn managed_main_rs() -> String {
     format!(
-        "{MANAGED_MAIN_MARKER}\nuse quartz::*;\nuse ramp::Drawable;\nuse {crate_name}::build_app;\n\nramp::run! {{ []; |ctx: &mut Context| {{ build_app(ctx) }} }}\n"
+        "{MANAGED_MAIN_MARKER}\nfn main() {{\n    #[cfg(not(target_arch=\"wasm32\"))]\n    {{\n        main::maverick_main()\n    }}\n}}\n"
     )
 }
 
 fn should_rewrite_managed_main(existing: &str) -> bool {
     existing.contains(MANAGED_MAIN_MARKER)
-        || (existing.contains("use quartz::*;")
-            && existing.contains("use ramp::Drawable;")
-            && existing.contains("::build_app;")
-            && existing.contains("ramp::run! { []; |ctx: &mut Context| { build_app(ctx) } }"))
+        || (existing.contains("fn main()") && existing.contains("main::maverick_main()"))
 }
 
 fn managed_lib_rs(scene_module_path: &str, canvas_mode: &str) -> String {
     format!(
-        "{MANAGED_LIB_MARKER}\nuse quartz::*;\nuse ramp::Drawable;\n\n#[path = \"{scene_module_path}\"]\nmod generated_scene;\n\npub fn build_app(ctx: &mut Context) -> impl Drawable {{\n    let mut canvas = Canvas::new(ctx, {canvas_mode});\n    generated_scene::setup_scene(&mut canvas);\n    generated_scene::register_logic(&mut canvas);\n    generated_scene::register_events(&mut canvas);\n    canvas\n}}\n"
+        "{MANAGED_LIB_MARKER}\nuse quartz::*;\nuse ramp::prism;\nuse ramp::Drawable;\n\n#[path = \"{scene_module_path}\"]\nmod generated_scene;\n\npub struct App;\n\nimpl App {{\n    fn new(ctx: &mut Context) -> impl Drawable {{\n        let mut canvas = Canvas::new(ctx, {canvas_mode});\n        generated_scene::setup_scene(&mut canvas);\n        generated_scene::register_logic(&mut canvas);\n        generated_scene::register_events(&mut canvas);\n        canvas\n    }}\n}}\n\nramp::run! {{ []; |ctx: &mut Context| {{ App::new(ctx) }} }}\n"
     )
 }
 
 fn should_rewrite_managed_lib(existing: &str) -> bool {
     existing.contains(MANAGED_LIB_MARKER)
         || (existing.contains("mod generated_scene;")
-            && existing.contains("pub fn build_app(ctx: &mut Context) -> impl Drawable")
+            && existing.contains("pub struct App;")
+            && existing.contains("fn new(ctx: &mut Context) -> impl Drawable")
             && existing.contains("generated_scene::setup_scene(&mut canvas);")
             && existing.contains("generated_scene::register_logic(&mut canvas);")
-            && existing.contains("generated_scene::register_events(&mut canvas);"))
+            && existing.contains("generated_scene::register_events(&mut canvas);")
+            && existing.contains("ramp::run! { []; |ctx: &mut Context| { App::new(ctx) } }"))
 }
 
 fn slugify_crate_name(name: &str) -> String {
@@ -462,13 +461,35 @@ fn slugify_crate_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        managed_lib_rs, managed_main_rs, should_rewrite_managed_lib, should_rewrite_managed_main,
-        validate_project_sync, write_sync_snapshot, ProjectSyncStatus,
+        managed_lib_rs, managed_main_rs, save_project, should_rewrite_managed_lib,
+        should_rewrite_managed_main, validate_project_sync, write_sync_snapshot,
+        ProjectSyncStatus,
     };
     use crate::core::project::EditorProjectState;
+    use crate::core::quartz_domain::{LogicNode, LogicTree, QuartzAction};
+    use crate::services::project_import;
+    use crate::services::project_sync::write_all_generated_files_from_state;
+
+    fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(root, &path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
 
     fn temp_project_root(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -480,7 +501,7 @@ mod tests {
 
     #[test]
     fn generated_main_marker_is_rewritable() {
-        let generated = managed_main_rs("my_game");
+        let generated = managed_main_rs();
         assert!(should_rewrite_managed_main(&generated));
     }
 
@@ -514,6 +535,86 @@ mod tests {
 
         let report = validate_project_sync(&state, &root).unwrap();
         assert_eq!(report.status, ProjectSyncStatus::InSync);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generated_scene_roundtrip_preserves_camera_effect_semantics() {
+        let root = temp_project_root("camera_roundtrip");
+        let mut state = EditorProjectState::new("sync_test".to_owned());
+        state.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+
+        let mut tree = LogicTree::new("logic_camera".to_owned(), "Camera flash".to_owned());
+        tree.output_file = "src/scripts/main_scene.rs".to_owned();
+        tree.nodes.push(LogicNode::Action(QuartzAction::CameraFlashWith {
+            color_rgba: [255, 255, 255, 200],
+            duration_s: 0.2,
+            mode: "Pulse".to_owned(),
+            ease: "Smooth".to_owned(),
+            intensity: 0.9,
+            freeze_frame_s: 0.05,
+        }));
+        tree.refresh_references();
+        state.manifest.scenes[0].logic_trees.push(tree);
+
+        save_project(&mut state, &root).unwrap();
+        write_all_generated_files_from_state(&state, &root).unwrap();
+        write_sync_snapshot(&state, &root).unwrap();
+
+        let report = validate_project_sync(&state, &root).unwrap();
+        assert_eq!(report.status, ProjectSyncStatus::InSync);
+
+        let mut files = Vec::new();
+        collect_rs_files(&root, &root.join("src"), &mut files);
+
+        let mut imported = EditorProjectState::new("sync_test".to_owned());
+        imported.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+        let import_report = project_import::import_files_into_state(&mut imported, &root, &files, true).unwrap();
+
+        assert_eq!(import_report.imported_logic_tree_count, 1);
+        let imported_tree = &imported.manifest.scenes[0].logic_trees[0];
+        let mut saw_flash = false;
+        for node in &imported_tree.nodes {
+            if let LogicNode::Action(action) = node {
+                match action {
+                    QuartzAction::CameraFlashWith { mode, ease, intensity, freeze_frame_s, .. } => {
+                        saw_flash = true;
+                        assert_eq!(mode, "Pulse");
+                        assert_eq!(ease, "Smooth");
+                        assert_eq!(*intensity, 0.9);
+                        assert_eq!(*freeze_frame_s, 0.05);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(saw_flash);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_project_sync_reports_expected_drift_for_manual_overrides() {
+        let root = temp_project_root("manual_override_drift");
+        let mut state = EditorProjectState::new("sync_test".to_owned());
+        state.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+
+        save_project(&mut state, &root).unwrap();
+        write_all_generated_files_from_state(&state, &root).unwrap();
+        write_sync_snapshot(&state, &root).unwrap();
+
+        let manual_override_rel = "src/scripts/manual_override.rs";
+        std::fs::write(
+            root.join(manual_override_rel),
+            "use quartz::prelude::*;\n\npub fn manual_override(_: &mut Canvas) {}\n",
+        )
+        .unwrap();
+
+        let report = validate_project_sync(&state, &root).unwrap();
+        assert_eq!(report.status, ProjectSyncStatus::FilesChangedOutsideQuartzForge);
+        assert!(report.extra_files.contains(&manual_override_rel.to_owned()));
 
         let _ = std::fs::remove_dir_all(&root);
     }

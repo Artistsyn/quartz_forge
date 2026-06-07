@@ -481,6 +481,7 @@ fn default_scene_view_bookmarks() -> Vec<SceneViewBookmark> {
 #[cfg(test)]
 mod tests {
     use super::EditorProjectState;
+    use crate::core::quartz_domain::{CompareOp, QuartzCondition, QuartzExpr, QuartzExprKind, QuartzTargetRef};
 
     #[test]
     fn track_manual_override_prefers_active_scene_match() {
@@ -522,5 +523,79 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].code, "two");
+    }
+
+    #[test]
+    fn condition_variants_serialize_roundtrip_compare() {
+        let input = QuartzCondition::Compare {
+            left: QuartzExpr {
+                kind: QuartzExprKind::Var,
+                raw: "score".to_owned(),
+            },
+            op: CompareOp::Ge,
+            right: QuartzExpr {
+                kind: QuartzExprKind::I32,
+                raw: "10".to_owned(),
+            },
+        };
+
+        let json = serde_json::to_string(&input).expect("compare condition should serialize");
+        let restored: QuartzCondition =
+            serde_json::from_str(&json).expect("compare condition should deserialize");
+
+        match restored {
+            QuartzCondition::Compare { left, op, right } => {
+                assert_eq!(left.kind, QuartzExprKind::Var);
+                assert_eq!(left.raw, "score");
+                assert_eq!(op, CompareOp::Ge);
+                assert_eq!(right.kind, QuartzExprKind::I32);
+                assert_eq!(right.raw, "10");
+            }
+            other => panic!("unexpected condition variant after roundtrip: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn condition_variants_serialize_roundtrip_planetary() {
+        let input = QuartzCondition::DominantPlanetIs {
+            target: QuartzTargetRef::Name("player".to_owned()),
+            planet: QuartzTargetRef::Tag("planet".to_owned()),
+        };
+
+        let json = serde_json::to_string(&input).expect("planetary condition should serialize");
+        let restored: QuartzCondition =
+            serde_json::from_str(&json).expect("planetary condition should deserialize");
+
+        match restored {
+            QuartzCondition::DominantPlanetIs { target, planet } => {
+                match target {
+                    QuartzTargetRef::Name(name) => assert_eq!(name, "player"),
+                    other => panic!("unexpected target variant: {:?}", other),
+                }
+                match planet {
+                    QuartzTargetRef::Tag(tag) => assert_eq!(tag, "planet"),
+                    other => panic!("unexpected planet variant: {:?}", other),
+                }
+            }
+            other => panic!("unexpected condition variant after roundtrip: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn condition_variants_serialize_roundtrip_emitter() {
+        let input = QuartzCondition::EmitterActive {
+            emitter: "thruster_smoke".to_owned(),
+        };
+
+        let json = serde_json::to_string(&input).expect("emitter condition should serialize");
+        let restored: QuartzCondition =
+            serde_json::from_str(&json).expect("emitter condition should deserialize");
+
+        match restored {
+            QuartzCondition::EmitterActive { emitter } => {
+                assert_eq!(emitter, "thruster_smoke");
+            }
+            other => panic!("unexpected condition variant after roundtrip: {:?}", other),
+        }
     }
 }

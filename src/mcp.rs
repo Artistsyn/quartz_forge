@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::project::{EditorProjectState, ProjectManifest};
+use crate::services::codegen;
 use crate::services::project_import;
 use crate::services::persistence;
 use crate::services::project_sync;
@@ -202,7 +203,10 @@ fn handle_rpc_request(paths: &WorkspacePaths, request: JsonRpcRequest) -> Result
 fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Value> {
     match tool_name {
         "qf_api_lookup" => {
-            let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("qf_api_lookup requires arguments.query"))?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(12) as usize;
             Ok(json!({
                 "tool": tool_name,
@@ -211,7 +215,10 @@ fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Val
             }))
         }
         "qf_api_verify_snippet" => {
-            let snippet = args.get("snippet").and_then(Value::as_str).unwrap_or("");
+            let snippet = args
+                .get("snippet")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("qf_api_verify_snippet requires arguments.snippet"))?;
             Ok(json!({
                 "tool": tool_name,
                 "verified": verify_snippet(paths, snippet)?,
@@ -334,7 +341,15 @@ fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Val
             }))
         }
         "qf_forge_check_parity" => {
-            let surface = args.get("surface").and_then(Value::as_str).unwrap_or("all");
+            let surface = match args.get("surface") {
+                Some(Value::String(value)) => value.as_str(),
+                Some(_) => {
+                    return Err(anyhow!(
+                        "qf_forge_check_parity requires arguments.surface as string: action|condition|wiring|all"
+                    ));
+                }
+                None => "all",
+            };
             Ok(json!({
                 "tool": tool_name,
                 "surface": surface,
@@ -672,6 +687,13 @@ fn verify_snippet(paths: &WorkspacePaths, snippet: &str) -> Result<Value> {
             "Repeated Font::from_bytes(...) parsing is slower than the preferred OnceLock<Font> cache used by ball_swing-style text helpers.".to_owned()
         );
     }
+    if snippet.contains("Action::SetPosition") {
+        warnings.push(
+            "Action::SetPosition can zero movement semantics; prefer Teleport or ApplyMomentum/SetMomentum for movement intent.".to_owned(),
+        );
+    }
+
+    let api_first_violations = codegen::api_first_static_guard_violations(snippet);
 
     let native_first = snippet.contains("quartz::prelude::*")
         || snippet.contains("Action::")
@@ -681,7 +703,8 @@ fn verify_snippet(paths: &WorkspacePaths, snippet: &str) -> Result<Value> {
         || snippet.contains("Span::new");
 
     Ok(json!({
-        "native_first": native_first,
+        "native_first": native_first && api_first_violations.is_empty(),
+        "api_first_guard_violations": api_first_violations,
         "missing_symbols": missing,
         "warnings": warnings,
         "line_count": snippet.lines().count(),
@@ -733,6 +756,27 @@ fn text_knowledge(paths: &WorkspacePaths) -> Result<Value> {
 fn codegen_api_guidance() -> Value {
     json!({
         "mandate": "Exhaust native Quartz API before writing custom Rust. This is a HARD RULE enforced by quartz_forge and copilot-instructions.md §5b.",
+        "gui_codegen_shape_contract": {
+            "intent": "AI-generated game source should mirror quartz_forge GUI export shape so semantic import can recover structured entities reliably.",
+            "required_functions": [
+                "pub fn setup_scene(canvas: &mut Canvas)",
+                "pub fn register_logic(canvas: &mut Canvas)",
+                "pub fn register_events(canvas: &mut Canvas)"
+            ],
+            "preferred_file_layout": [
+                "Scene entry: src/scenes/*_scene.rs",
+                "Object/event/update component files: src/scripts/*.rs",
+                "Constants: src/constants.rs",
+                "Game vars: src/game_state.rs"
+            ],
+            "authoring_rules": [
+                "Use canvas.add_event(GameEvent::...) for event entities instead of ad-hoc dispatch in on_update.",
+                "Use canvas.on_update(|canvas| { canvas.run(Action::...) ... }) for update loop entities.",
+                "Use canvas.register_custom_event(name, |canvas| {...}) for custom-event entities.",
+                "Define GameObject::build chains directly in setup_scene or spawn_* helpers so object importer can recover object blueprints.",
+                "Keep scalar game state in canvas.set_var/get_var with Action::SetVar/ModVar for importer-visible game vars."
+            ]
+        },
         "dispatch_priority_order": [
             {
                 "step": 1,
@@ -815,6 +859,7 @@ fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
             "Update project.qforge.json alongside generated Rust or quartz_forge will not reflect the change in the editor.",
             "Scene source_file paths should live under src/scenes and follow *_scene.rs naming to match quartz_project_layout conventions.",
             "Prefer scene source_file and per-surface output_file routing instead of inventing ad-hoc module layouts outside the manifest.",
+            "AI codegen should mirror quartz_forge GUI export shape (setup_scene/register_logic/register_events + component routing) for reliable semantic import.",
             "For static images, prefer canvas.load_image_cached/load_image_sized_cached over repeated quartz::sprite::load_image calls when reuse is expected.",
             "Use custom code blocks or ManualFileOverride for user-owned Rust sections that must survive regeneration.",
             "Keep generated scene/component module paths relative to the scene source file layout, not hard-coded to the project root."
@@ -1169,6 +1214,13 @@ fn sync_report_json(report: &persistence::ProjectSyncReport) -> Value {
 }
 
 fn parity_report(paths: &WorkspacePaths, surface: &str) -> Result<Value> {
+    if !matches!(surface, "action" | "condition" | "wiring" | "all") {
+        anyhow::bail!(
+            "qf_forge_check_parity invalid arguments.surface '{}' expected one of: action|condition|wiring|all",
+            surface
+        );
+    }
+
     let action_quartz = enum_variants(&paths.quartz_action_rs, "Action")?;
     let action_forge = enum_variants(&paths.forge_domain_rs, "QuartzAction")?;
     let condition_quartz = enum_variants(&paths.quartz_condition_rs, "Condition")?;
@@ -1213,7 +1265,15 @@ fn parity_report(paths: &WorkspacePaths, surface: &str) -> Result<Value> {
             .unwrap_or_default();
         let domain_text = fs::read_to_string(&paths.forge_domain_rs).unwrap_or_default();
 
-        let new_variants = ["SetVar", "ModVar", "SpawnObject", "SetText"];
+        let new_variants = [
+            "SetVar",
+            "ModVar",
+            "Spawn",
+            "PluginCall",
+            "SetPosition",
+            "SpawnObject",
+            "SetText",
+        ];
         let wiring: Vec<_> = new_variants.iter().map(|v| {
             json!({
                 "variant": v,
@@ -1247,6 +1307,12 @@ fn spawn_audit(paths: &WorkspacePaths) -> Result<Value> {
         "spawn_overlay_toggle_present": app_text.contains("show_spawn_overlay"),
         "spawn_object_creator_present": project_text.contains("add_spawn_only_object_to_active_scene"),
         "spawn_helper_generation_present": codegen_text.contains("spawn_only"),
+        "first_class_spawn_variant_present": domain_text.contains("Spawn {")
+            && codegen_text.contains("QuartzAction::Spawn")
+            && codegen_text.contains("Action::Spawn"),
+        "first_class_plugincall_variant_present": domain_text.contains("PluginCall {")
+            && codegen_text.contains("QuartzAction::PluginCall")
+            && codegen_text.contains("Action::PluginCall"),
         "notes": [
             "spawn-only objects are omitted from setup_scene registration",
             "spawn-only objects can be drawn as ghost overlays when the overlay toggle is enabled",
@@ -1530,4 +1596,221 @@ fn write_rpc_response(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_workspace_paths() -> WorkspacePaths {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = crate_root
+            .parent()
+            .expect("quartz_forge crate should live under FlowMake root")
+            .to_path_buf();
+        let mcp_dir = root.join(".quartz_forge").join("mcp");
+        WorkspacePaths {
+            quartz_api_txt: root.join("quartz").join("api.txt"),
+            quartz_action_rs: root.join("quartz").join("src").join("types").join("action.rs"),
+            quartz_condition_rs: root
+                .join("quartz")
+                .join("src")
+                .join("types")
+                .join("condition.rs"),
+            forge_domain_rs: root
+                .join("quartz_forge")
+                .join("src")
+                .join("core")
+                .join("quartz_domain.rs"),
+            root,
+            mcp_dir: mcp_dir.clone(),
+            lock_file: mcp_dir.join("server.lock"),
+            heartbeat_file: mcp_dir.join("heartbeat.json"),
+        }
+    }
+
+    #[test]
+    fn parity_report_action_missing_set_empty_after_p6() {
+        let paths = test_workspace_paths();
+        let report = parity_report(&paths, "action").unwrap();
+        let current = report["action"]["missing_in_forge"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            current.is_empty(),
+            "Action parity should be complete after P6, but missing variants remain: {:?}",
+            current
+        );
+    }
+
+    #[test]
+    fn parity_report_condition_missing_set_empty_after_p1() {
+        let paths = test_workspace_paths();
+        let report = parity_report(&paths, "condition").unwrap();
+        let current = report["condition"]["missing_in_forge"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            current.is_empty(),
+            "Condition parity should be complete after P1, but missing variants remain: {:?}",
+            current
+        );
+    }
+
+    #[test]
+    fn parity_report_action_cluster_a_removed_from_missing() {
+        let paths = test_workspace_paths();
+        let report = parity_report(&paths, "action").unwrap();
+        let current = report["action"]["missing_in_forge"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        let cluster_a = [
+            "ApplyForce",
+            "ApplyImpulse",
+            "FreezeBody",
+            "UnfreezeBody",
+            "WakeBody",
+            "SetMaterial",
+            "SetDensity",
+            "SetElasticity",
+            "SetFriction",
+            "SetPhysicsQuality",
+            "SetCollisionMode",
+            "SetSlope",
+            "SetSurfaceNormal",
+            "TransferMomentum",
+        ];
+
+        assert!(
+            current
+                .iter()
+                .all(|variant| !cluster_a.contains(variant)),
+            "Action parity still missing cluster A variants: {:?}",
+            current
+                .iter()
+                .filter(|variant| cluster_a.contains(variant))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mcp_condition_paths_return_deterministic_errors() {
+        let paths = test_workspace_paths();
+
+        let invalid_surface = call_tool(
+            &paths,
+            "qf_forge_check_parity",
+            json!({ "surface": "conditions" }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            invalid_surface
+                .contains("qf_forge_check_parity invalid arguments.surface 'conditions' expected one of: action|condition|wiring|all")
+        );
+
+        let wrong_surface_type = call_tool(
+            &paths,
+            "qf_forge_check_parity",
+            json!({ "surface": 42 }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            wrong_surface_type
+                .contains("qf_forge_check_parity requires arguments.surface as string: action|condition|wiring|all")
+        );
+    }
+
+    #[test]
+    fn parity_report_all_surface_shape_is_stable() {
+        let paths = test_workspace_paths();
+        let report = parity_report(&paths, "all").unwrap();
+
+        assert!(report.get("action").is_some());
+        assert!(report.get("condition").is_some());
+        assert!(report.get("new_action_wiring").is_some());
+        assert!(report["new_action_wiring"]["status"].is_array());
+
+        let status_rows = report["new_action_wiring"]["status"].as_array().unwrap();
+        for row in status_rows {
+            assert!(row.get("variant").is_some());
+            assert!(row.get("in_domain").is_some());
+            assert!(row.get("in_codegen").is_some());
+            assert!(row.get("in_editors").is_some());
+        }
+    }
+
+    #[test]
+    fn spawn_audit_reports_first_class_spawn_support() {
+        let paths = test_workspace_paths();
+        let report = spawn_audit(&paths).unwrap();
+
+        assert_eq!(report["first_class_spawn_variant_present"], json!(true));
+        assert_eq!(report["first_class_plugincall_variant_present"], json!(true));
+    }
+
+    #[test]
+    fn mcp_requires_project_root_for_state_dump() {
+        let paths = test_workspace_paths();
+        let err = call_tool(&paths, "qf_project_state_dump", json!({}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("qf_project_state_dump requires arguments.project_root"));
+    }
+
+    #[test]
+    fn mcp_requires_manifest_for_apply_state() {
+        let paths = test_workspace_paths();
+        let err = call_tool(
+            &paths,
+            "qf_project_apply_state",
+            json!({
+                "project_root": "./tmp_project"
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("qf_project_apply_state requires arguments.manifest"));
+    }
+
+    #[test]
+    fn mcp_requires_files_for_import_semantic() {
+        let paths = test_workspace_paths();
+        let err = call_tool(
+            &paths,
+            "qf_project_import_semantic",
+            json!({
+                "project_root": "./tmp_project"
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("qf_project_import_semantic requires arguments.files"));
+    }
+
+    #[test]
+    fn mcp_requires_files_for_import_manual_overrides() {
+        let paths = test_workspace_paths();
+        let err = call_tool(
+            &paths,
+            "qf_project_import_manual_overrides",
+            json!({
+                "project_root": "./tmp_project"
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("qf_project_import_manual_overrides requires arguments.files"));
+    }
 }

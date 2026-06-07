@@ -62,6 +62,12 @@ pub struct SceneCanvasSpec {
     pub orientation: CanvasOrientation,
     #[serde(default)]
     pub snap_background_objects_to_cells: bool,
+    #[serde(default)]
+    pub crystalline_enabled: bool,
+    #[serde(default)]
+    pub crystalline_profile: CrystallineConfigProfile,
+    #[serde(default)]
+    pub crystalline_quality: CrystallineQuality,
 }
 
 impl Default for SceneCanvasSpec {
@@ -83,6 +89,57 @@ impl Default for SceneCanvasSpec {
             show_background_cells: false,
             orientation: CanvasOrientation::Landscape,
             snap_background_objects_to_cells: false,
+            crystalline_enabled: false,
+            crystalline_profile: CrystallineConfigProfile::default(),
+            crystalline_quality: CrystallineQuality::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrystallineConfigProfile {
+    Platformer,
+    Floaty,
+    Realistic,
+    Arcade,
+}
+
+impl Default for CrystallineConfigProfile {
+    fn default() -> Self {
+        Self::Platformer
+    }
+}
+
+impl CrystallineConfigProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrystallineConfigProfile::Platformer => "Platformer",
+            CrystallineConfigProfile::Floaty => "Floaty",
+            CrystallineConfigProfile::Realistic => "Realistic",
+            CrystallineConfigProfile::Arcade => "Arcade",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrystallineQuality {
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for CrystallineQuality {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl CrystallineQuality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrystallineQuality::Low => "Low",
+            CrystallineQuality::Medium => "Medium",
+            CrystallineQuality::High => "High",
         }
     }
 }
@@ -226,6 +283,33 @@ impl ObjectTemplate {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuartzObjectCollisionMode {
+    Auto,
+    NonPlatform,
+    Surface,
+    SolidRectangle,
+    SolidCircle,
+}
+
+impl Default for QuartzObjectCollisionMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl QuartzObjectCollisionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuartzObjectCollisionMode::Auto => "Auto",
+            QuartzObjectCollisionMode::NonPlatform => "NonPlatform",
+            QuartzObjectCollisionMode::Surface => "Surface",
+            QuartzObjectCollisionMode::SolidRectangle => "SolidRectangle",
+            QuartzObjectCollisionMode::SolidCircle => "SolidCircle",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectAdvancedParams {
     pub momentum_x: f32,
@@ -234,14 +318,46 @@ pub struct ObjectAdvancedParams {
     pub resistance_y: f32,
     pub gravity: f32,
     pub rotation_deg: f32,
+    #[serde(default)]
+    pub rotation_resistance: f32,
     #[serde(default = "default_pivot_component")]
     pub pivot_x: f32,
     #[serde(default = "default_pivot_component")]
     pub pivot_y: f32,
     #[serde(default)]
     pub material: ObjectPhysicsMaterialSpec,
+    #[serde(default)]
+    pub tint_enabled: bool,
+    #[serde(default = "default_effect_rgba")]
+    pub tint_rgba: [u8; 4],
+    #[serde(default)]
+    pub glow_enabled: bool,
+    #[serde(default = "default_effect_rgba")]
+    pub glow_rgba: [u8; 4],
+    #[serde(default = "default_glow_width")]
+    pub glow_width: f32,
     pub collision_layer: u32,
     pub collision_mask: u32,
+    #[serde(default)]
+    pub is_platform: bool,
+    #[serde(default)]
+    pub collision_mode: QuartzObjectCollisionMode,
+    #[serde(default = "default_collision_circle_radius")]
+    pub collision_circle_radius: f32,
+    #[serde(default)]
+    pub clip_enabled: bool,
+    #[serde(default)]
+    pub clip_origin_enabled: bool,
+    #[serde(default)]
+    pub clip_origin_x: f32,
+    #[serde(default)]
+    pub clip_origin_y: f32,
+    #[serde(default)]
+    pub clip_size_enabled: bool,
+    #[serde(default)]
+    pub clip_size_w: f32,
+    #[serde(default)]
+    pub clip_size_h: f32,
     #[serde(default)]
     pub slope_enabled: bool,
     #[serde(default)]
@@ -290,6 +406,20 @@ pub struct ObjectAdvancedParams {
     pub auto_align: bool,
     #[serde(default = "default_auto_align_speed")]
     pub auto_align_speed: f32,
+    #[serde(default = "default_auto_align_threshold")]
+    pub auto_align_threshold: f32,
+    #[serde(default = "default_auto_align_min_depth")]
+    pub auto_align_min_depth: f32,
+    #[serde(default)]
+    pub screen_pin_enabled: bool,
+    #[serde(default = "default_pin_anchor_component")]
+    pub screen_pin_anchor_x: f32,
+    #[serde(default = "default_pin_anchor_component")]
+    pub screen_pin_anchor_y: f32,
+    #[serde(default)]
+    pub screen_pin_offset_x: f32,
+    #[serde(default)]
+    pub screen_pin_offset_y: f32,
     pub ignore_zoom: bool,
     pub screen_space: bool,
 }
@@ -303,11 +433,27 @@ impl Default for ObjectAdvancedParams {
             resistance_y: 0.0,
             gravity: 0.0,
             rotation_deg: 0.0,
+            rotation_resistance: 0.0,
             pivot_x: 0.5,
             pivot_y: 0.5,
             material: ObjectPhysicsMaterialSpec::default(),
+            tint_enabled: false,
+            tint_rgba: default_effect_rgba(),
+            glow_enabled: false,
+            glow_rgba: default_effect_rgba(),
+            glow_width: default_glow_width(),
             collision_layer: 1,
             collision_mask: 1,
+            is_platform: false,
+            collision_mode: QuartzObjectCollisionMode::default(),
+            collision_circle_radius: default_collision_circle_radius(),
+            clip_enabled: false,
+            clip_origin_enabled: false,
+            clip_origin_x: 0.0,
+            clip_origin_y: 0.0,
+            clip_size_enabled: false,
+            clip_size_w: 0.0,
+            clip_size_h: 0.0,
             slope_enabled: false,
             slope_left_offset: 0.0,
             slope_right_offset: 0.0,
@@ -332,6 +478,13 @@ impl Default for ObjectAdvancedParams {
             gravity_identity: String::new(),
             auto_align: false,
             auto_align_speed: default_auto_align_speed(),
+            auto_align_threshold: default_auto_align_threshold(),
+            auto_align_min_depth: default_auto_align_min_depth(),
+            screen_pin_enabled: false,
+            screen_pin_anchor_x: default_pin_anchor_component(),
+            screen_pin_anchor_y: default_pin_anchor_component(),
+            screen_pin_offset_x: 0.0,
+            screen_pin_offset_y: 0.0,
             ignore_zoom: false,
             screen_space: false,
         }
@@ -363,16 +516,35 @@ impl QuartzGravityFalloff {
 
 impl ObjectAdvancedParams {
     pub fn is_camera_space_pinned(&self) -> bool {
-        self.screen_space
+        self.screen_space || self.screen_pin_enabled
     }
 
     pub fn set_camera_space_pinned(&mut self, enabled: bool) {
         self.screen_space = enabled;
         if enabled {
+            self.screen_pin_enabled = false;
+        }
+        if enabled {
             // Camera-pinned objects must ignore zoom so they stay in screen space.
             self.ignore_zoom = true;
         }
     }
+}
+
+fn default_collision_circle_radius() -> f32 {
+    24.0
+}
+
+fn default_pin_anchor_component() -> f32 {
+    0.5
+}
+
+fn default_effect_rgba() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
+
+fn default_glow_width() -> f32 {
+    4.0
 }
 
 fn default_pivot_component() -> f32 {
@@ -401,6 +573,14 @@ fn default_gravity_influence_mult() -> f32 {
 
 fn default_auto_align_speed() -> f32 {
     10.0
+}
+
+fn default_auto_align_threshold() -> f32 {
+    0.01
+}
+
+fn default_auto_align_min_depth() -> f32 {
+    0.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,6 +1089,10 @@ pub enum QuartzAction {
     SmoothZoom {
         value: f32,
     },
+    PluginCall {
+        name: String,
+        payload: String,
+    },
     RunPlugin {
         name: String,
         data: String,
@@ -930,6 +1114,208 @@ pub enum QuartzAction {
     CameraZoomPunch {
         amount: f32,
         duration_s: f32,
+    },
+    SetMaterial {
+        target: QuartzTargetRef,
+        material: ObjectPhysicsMaterialSpec,
+    },
+    SetDensity {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    SetElasticity {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    SetFriction {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    ApplyForce {
+        target: QuartzTargetRef,
+        fx: f32,
+        fy: f32,
+    },
+    ApplyImpulse {
+        target: QuartzTargetRef,
+        ix: f32,
+        iy: f32,
+    },
+    SetPosition {
+        target: QuartzTargetRef,
+        x: f32,
+        y: f32,
+    },
+    FreezeBody {
+        target: QuartzTargetRef,
+    },
+    UnfreezeBody {
+        target: QuartzTargetRef,
+    },
+    WakeBody {
+        target: QuartzTargetRef,
+    },
+    SetPhysicsQuality {
+        quality: String,
+    },
+    SetCollisionMode {
+        target: QuartzTargetRef,
+        mode: String,
+    },
+    SetSlope {
+        target: QuartzTargetRef,
+        left_offset: f32,
+        right_offset: f32,
+        auto_rotate: bool,
+    },
+    SetSurfaceNormal {
+        target: QuartzTargetRef,
+        nx: f32,
+        ny: f32,
+    },
+    TransferMomentum {
+        from: QuartzTargetRef,
+        to: QuartzTargetRef,
+        scale: f32,
+    },
+    Spawn {
+        template_id: String,
+        location: QuartzLocationRef,
+    },
+    EnableCrystalline,
+    DisableCrystalline,
+    SetGravityStrength {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    SetPlanetRadius {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    SetGravityTarget {
+        target: QuartzTargetRef,
+        tag: String,
+    },
+    SetGravityInfluenceMult {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    SetGravityFalloff {
+        target: QuartzTargetRef,
+        falloff: String,
+    },
+    SetGravityAllSources {
+        target: QuartzTargetRef,
+        enabled: bool,
+    },
+    SetAlignToSlope {
+        target: QuartzTargetRef,
+        enabled: bool,
+    },
+    SetAlignToSlopeSpeed {
+        target: QuartzTargetRef,
+        value: f32,
+    },
+    SpawnEmitter {
+        name: String,
+    },
+    RemoveEmitter {
+        name: String,
+    },
+    AttachEmitter {
+        emitter_name: String,
+        target: QuartzTargetRef,
+        location: Option<QuartzLocationRef>,
+    },
+    DetachEmitter {
+        emitter_name: String,
+    },
+    SetEmitterRate {
+        name: String,
+        value: f32,
+    },
+    SetEmitterLifetime {
+        name: String,
+        value: f32,
+    },
+    SetEmitterVelocity {
+        name: String,
+        x: f32,
+        y: f32,
+    },
+    SetEmitterSpread {
+        name: String,
+        x: f32,
+        y: f32,
+    },
+    SetEmitterSize {
+        name: String,
+        value: f32,
+    },
+    SetEmitterColor {
+        name: String,
+        rgba: [u8; 4],
+    },
+    SetEmitterGravityScale {
+        name: String,
+        value: f32,
+    },
+    SetEmitterCollision {
+        name: String,
+        mode: String,
+    },
+    SetEmitterRenderLayer {
+        name: String,
+        value: i32,
+    },
+    SetEmitterSizeEnd {
+        name: String,
+        value: f32,
+    },
+    SetEmitterColorEnd {
+        name: String,
+        rgba: Option<[u8; 4]>,
+    },
+    SetEmitterShape {
+        name: String,
+        shape: String,
+    },
+    SetEmitterAlignToVelocity {
+        name: String,
+        enabled: bool,
+    },
+    SetEmitterInterpolatePosition {
+        name: String,
+        enabled: bool,
+    },
+    AddZoom {
+        value: f32,
+    },
+    SmoothZoomAt {
+        delta: f32,
+    },
+    CameraFlashWith {
+        color_rgba: [u8; 4],
+        duration_s: f32,
+        mode: String,
+        ease: String,
+        intensity: f32,
+        freeze_frame_s: f32,
+    },
+    SetGlow {
+        target: QuartzTargetRef,
+        color_rgb: [u8; 3],
+        width: f32,
+    },
+    ClearGlow {
+        target: QuartzTargetRef,
+    },
+    SetTint {
+        target: QuartzTargetRef,
+        color_rgba: [u8; 4],
+    },
+    ClearTint {
+        target: QuartzTargetRef,
     },
     /// Set a named variable to a literal or variable-reference expression.
     SetVar {
@@ -1040,6 +1426,7 @@ impl QuartzAction {
             QuartzAction::SetZoom { value } => format!("SetZoom {value:.2}"),
             QuartzAction::SmoothZoom { value } => format!("SmoothZoom {value:.2}"),
             QuartzAction::RunPlugin { name, .. } => format!("RunPlugin {name}"),
+            QuartzAction::PluginCall { name, .. } => format!("PluginCall {name}"),
             QuartzAction::Expr { raw } => format!("Expr({raw})"),
             QuartzAction::Custom { name } => format!("Custom {name}"),
             QuartzAction::CameraFlash {
@@ -1053,6 +1440,173 @@ impl QuartzAction {
             QuartzAction::CameraZoomPunch { amount, duration_s } => {
                 format!("CameraZoomPunch {amount:.2} for {duration_s:.2}s")
             }
+            QuartzAction::SetMaterial { target, material } => {
+                format!(
+                    "SetMaterial {} [{} e={:.2} f={:.2} d={:.2}]",
+                    target.short_label(),
+                    material.preset.as_str(),
+                    material.elasticity,
+                    material.friction,
+                    material.density
+                )
+            }
+            QuartzAction::SetDensity { target, value } => {
+                format!("SetDensity {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::SetElasticity { target, value } => {
+                format!("SetElasticity {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::SetFriction { target, value } => {
+                format!("SetFriction {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::ApplyForce { target, fx, fy } => {
+                format!("ApplyForce {} ({fx:.2}, {fy:.2})", target.short_label())
+            }
+            QuartzAction::ApplyImpulse { target, ix, iy } => {
+                format!("ApplyImpulse {} ({ix:.2}, {iy:.2})", target.short_label())
+            }
+            QuartzAction::SetPosition { target, x, y } => {
+                format!("SetPosition {} ({x:.2}, {y:.2})", target.short_label())
+            }
+            QuartzAction::FreezeBody { target } => {
+                format!("FreezeBody {}", target.short_label())
+            }
+            QuartzAction::UnfreezeBody { target } => {
+                format!("UnfreezeBody {}", target.short_label())
+            }
+            QuartzAction::WakeBody { target } => {
+                format!("WakeBody {}", target.short_label())
+            }
+            QuartzAction::SetPhysicsQuality { quality } => {
+                format!("SetPhysicsQuality {}", quality)
+            }
+            QuartzAction::SetCollisionMode { target, mode } => {
+                format!("SetCollisionMode {} [{}]", target.short_label(), mode)
+            }
+            QuartzAction::SetSlope {
+                target,
+                left_offset,
+                right_offset,
+                auto_rotate,
+            } => {
+                format!(
+                    "SetSlope {} l={left_offset:.2} r={right_offset:.2} auto={}",
+                    target.short_label(),
+                    auto_rotate
+                )
+            }
+            QuartzAction::SetSurfaceNormal { target, nx, ny } => {
+                format!("SetSurfaceNormal {} ({nx:.2}, {ny:.2})", target.short_label())
+            }
+            QuartzAction::TransferMomentum { from, to, scale } => {
+                format!(
+                    "TransferMomentum {} -> {} (x{scale:.2})",
+                    from.short_label(),
+                    to.short_label()
+                )
+            }
+            QuartzAction::Spawn { template_id, .. } => format!("Spawn [{}]", template_id),
+            QuartzAction::EnableCrystalline => "EnableCrystalline".to_owned(),
+            QuartzAction::DisableCrystalline => "DisableCrystalline".to_owned(),
+            QuartzAction::SetGravityStrength { target, value } => {
+                format!("SetGravityStrength {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::SetPlanetRadius { target, value } => {
+                format!("SetPlanetRadius {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::SetGravityTarget { target, tag } => {
+                format!("SetGravityTarget {} -> [{}]", target.short_label(), tag)
+            }
+            QuartzAction::SetGravityInfluenceMult { target, value } => {
+                format!("SetGravityInfluenceMult {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::SetGravityFalloff { target, falloff } => {
+                format!("SetGravityFalloff {} -> [{}]", target.short_label(), falloff)
+            }
+            QuartzAction::SetGravityAllSources { target, enabled } => {
+                format!("SetGravityAllSources {} -> {}", target.short_label(), enabled)
+            }
+            QuartzAction::SetAlignToSlope { target, enabled } => {
+                format!("SetAlignToSlope {} -> {}", target.short_label(), enabled)
+            }
+            QuartzAction::SetAlignToSlopeSpeed { target, value } => {
+                format!("SetAlignToSlopeSpeed {} -> {value:.2}", target.short_label())
+            }
+            QuartzAction::SpawnEmitter { name } => format!("SpawnEmitter [{}]", name),
+            QuartzAction::RemoveEmitter { name } => format!("RemoveEmitter [{}]", name),
+            QuartzAction::AttachEmitter {
+                emitter_name,
+                target,
+                ..
+            } => {
+                format!("AttachEmitter [{}] -> {}", emitter_name, target.short_label())
+            }
+            QuartzAction::DetachEmitter { emitter_name } => {
+                format!("DetachEmitter [{}]", emitter_name)
+            }
+            QuartzAction::SetEmitterRate { name, value } => {
+                format!("SetEmitterRate [{}] -> {value:.2}", name)
+            }
+            QuartzAction::SetEmitterLifetime { name, value } => {
+                format!("SetEmitterLifetime [{}] -> {value:.2}", name)
+            }
+            QuartzAction::SetEmitterVelocity { name, x, y } => {
+                format!("SetEmitterVelocity [{}] ({x:.2}, {y:.2})", name)
+            }
+            QuartzAction::SetEmitterSpread { name, x, y } => {
+                format!("SetEmitterSpread [{}] ({x:.2}, {y:.2})", name)
+            }
+            QuartzAction::SetEmitterSize { name, value } => {
+                format!("SetEmitterSize [{}] -> {value:.2}", name)
+            }
+            QuartzAction::SetEmitterColor { name, rgba } => {
+                format!("SetEmitterColor [{}] rgba{:?}", name, rgba)
+            }
+            QuartzAction::SetEmitterGravityScale { name, value } => {
+                format!("SetEmitterGravityScale [{}] -> {value:.2}", name)
+            }
+            QuartzAction::SetEmitterCollision { name, mode } => {
+                format!("SetEmitterCollision [{}] [{}]", name, mode)
+            }
+            QuartzAction::SetEmitterRenderLayer { name, value } => {
+                format!("SetEmitterRenderLayer [{}] -> {}", name, value)
+            }
+            QuartzAction::SetEmitterSizeEnd { name, value } => {
+                format!("SetEmitterSizeEnd [{}] -> {value:.2}", name)
+            }
+            QuartzAction::SetEmitterColorEnd { name, rgba } => {
+                format!("SetEmitterColorEnd [{}] {:?}", name, rgba)
+            }
+            QuartzAction::SetEmitterShape { name, shape } => {
+                format!("SetEmitterShape [{}] [{}]", name, shape)
+            }
+            QuartzAction::SetEmitterAlignToVelocity { name, enabled } => {
+                format!("SetEmitterAlignToVelocity [{}] -> {}", name, enabled)
+            }
+            QuartzAction::SetEmitterInterpolatePosition { name, enabled } => {
+                format!("SetEmitterInterpolatePosition [{}] -> {}", name, enabled)
+            }
+            QuartzAction::AddZoom { value } => format!("AddZoom {value:.2}"),
+            QuartzAction::SmoothZoomAt { delta } => format!("SmoothZoomAt {delta:.2}"),
+            QuartzAction::CameraFlashWith {
+                duration_s,
+                mode,
+                ease,
+                intensity,
+                ..
+            } => {
+                format!(
+                    "CameraFlashWith {duration_s:.2}s {} {} @ {intensity:.2}",
+                    mode,
+                    ease
+                )
+            }
+            QuartzAction::SetGlow { target, width, .. } => {
+                format!("SetGlow {} width={width:.2}", target.short_label())
+            }
+            QuartzAction::ClearGlow { target } => format!("ClearGlow {}", target.short_label()),
+            QuartzAction::SetTint { target, .. } => format!("SetTint {}", target.short_label()),
+            QuartzAction::ClearTint { target } => format!("ClearTint {}", target.short_label()),
             QuartzAction::SetVar { name, value } => format!("SetVar {} = {:?} ({})", name, value.raw, format!("{:?}", value.kind)),
             QuartzAction::ModVar { name, op, operand } => format!("ModVar {} {:?}= {:?}", name, op, operand.raw),
             QuartzAction::SpawnObject { template_id, .. } => format!("SpawnObject [{}]", template_id),
@@ -1085,14 +1639,80 @@ impl QuartzAction {
             | QuartzAction::Remove { target }
             | QuartzAction::AddTag { target, .. }
             | QuartzAction::RemoveTag { target, .. }
-            | QuartzAction::SetAnimation { target, .. } => target.collect_object_refs(out),
+            | QuartzAction::SetAnimation { target, .. }
+            | QuartzAction::SetMaterial { target, .. }
+            | QuartzAction::SetDensity { target, .. }
+            | QuartzAction::SetElasticity { target, .. }
+            | QuartzAction::SetFriction { target, .. }
+            | QuartzAction::ApplyForce { target, .. }
+            | QuartzAction::ApplyImpulse { target, .. }
+            | QuartzAction::SetPosition { target, .. }
+            | QuartzAction::FreezeBody { target }
+            | QuartzAction::UnfreezeBody { target }
+            | QuartzAction::WakeBody { target }
+            | QuartzAction::SetCollisionMode { target, .. }
+            | QuartzAction::SetSlope { target, .. }
+            | QuartzAction::SetSurfaceNormal { target, .. }
+            | QuartzAction::SetGlow { target, .. }
+            | QuartzAction::ClearGlow { target }
+            | QuartzAction::SetTint { target, .. }
+            | QuartzAction::ClearTint { target }
+            | QuartzAction::SetGravityStrength { target, .. }
+            | QuartzAction::SetPlanetRadius { target, .. }
+            | QuartzAction::SetGravityTarget { target, .. }
+            | QuartzAction::SetGravityInfluenceMult { target, .. }
+            | QuartzAction::SetGravityFalloff { target, .. }
+            | QuartzAction::SetGravityAllSources { target, .. }
+            | QuartzAction::SetAlignToSlope { target, .. }
+            | QuartzAction::SetAlignToSlopeSpeed { target, .. } => target.collect_object_refs(out),
+            QuartzAction::EnableCrystalline | QuartzAction::DisableCrystalline => {}
             QuartzAction::SetText { target, .. } => target.collect_object_refs(out),
+            QuartzAction::TransferMomentum { from, to, .. } => {
+                from.collect_object_refs(out);
+                to.collect_object_refs(out);
+            }
+            QuartzAction::Spawn { location, .. } | QuartzAction::SpawnObject { location, .. } => {
+                if let QuartzLocationRef::AtTarget(t) = location {
+                    t.collect_object_refs(out);
+                }
+            }
+            QuartzAction::AttachEmitter {
+                target,
+                location,
+                ..
+            } => {
+                target.collect_object_refs(out);
+                if let Some(QuartzLocationRef::AtTarget(t)) = location {
+                    t.collect_object_refs(out);
+                }
+            }
             QuartzAction::SetVar { .. }
             | QuartzAction::ModVar { .. }
-            | QuartzAction::SpawnObject { .. }
             | QuartzAction::PlaySound { .. }
             | QuartzAction::SetZoom { .. }
             | QuartzAction::SmoothZoom { .. }
+            | QuartzAction::AddZoom { .. }
+            | QuartzAction::SmoothZoomAt { .. }
+            | QuartzAction::SetPhysicsQuality { .. }
+            | QuartzAction::SpawnEmitter { .. }
+            | QuartzAction::RemoveEmitter { .. }
+            | QuartzAction::DetachEmitter { .. }
+            | QuartzAction::SetEmitterRate { .. }
+            | QuartzAction::SetEmitterLifetime { .. }
+            | QuartzAction::SetEmitterVelocity { .. }
+            | QuartzAction::SetEmitterSpread { .. }
+            | QuartzAction::SetEmitterSize { .. }
+            | QuartzAction::SetEmitterColor { .. }
+            | QuartzAction::SetEmitterGravityScale { .. }
+            | QuartzAction::SetEmitterCollision { .. }
+            | QuartzAction::SetEmitterRenderLayer { .. }
+            | QuartzAction::SetEmitterSizeEnd { .. }
+            | QuartzAction::SetEmitterColorEnd { .. }
+            | QuartzAction::SetEmitterShape { .. }
+            | QuartzAction::SetEmitterAlignToVelocity { .. }
+            | QuartzAction::SetEmitterInterpolatePosition { .. }
+            | QuartzAction::CameraFlashWith { .. }
+            | QuartzAction::PluginCall { .. }
             | QuartzAction::RunPlugin { .. }
             | QuartzAction::Expr { .. }
             | QuartzAction::Custom { .. }
@@ -1143,6 +1763,11 @@ pub enum QuartzCondition {
         op: CompareOp,
         value: f32,
     },
+    Compare {
+        left: QuartzExpr,
+        op: CompareOp,
+        right: QuartzExpr,
+    },
     VarExists {
         variable: String,
     },
@@ -1179,6 +1804,12 @@ pub enum QuartzCondition {
     IsSleeping {
         target: QuartzTargetRef,
     },
+    IsRotating {
+        target: QuartzTargetRef,
+    },
+    IsStill {
+        target: QuartzTargetRef,
+    },
     SpeedAbove {
         target: QuartzTargetRef,
         value: f32,
@@ -1188,6 +1819,27 @@ pub enum QuartzCondition {
         value: f32,
     },
     CrystallineEnabled,
+    EmitterActive {
+        emitter: String,
+    },
+    OnPlanet {
+        target: QuartzTargetRef,
+        planet: QuartzTargetRef,
+    },
+    InGravityField {
+        target: QuartzTargetRef,
+        planet: QuartzTargetRef,
+    },
+    HasDominantPlanet {
+        target: QuartzTargetRef,
+    },
+    DominantPlanetIs {
+        target: QuartzTargetRef,
+        planet: QuartzTargetRef,
+    },
+    InAnyGravityField {
+        target: QuartzTargetRef,
+    },
     Plugin {
         name: String,
         arg: Option<String>,
@@ -1214,6 +1866,9 @@ impl QuartzCondition {
                 op,
                 value,
             } => format!("{} {} {}", variable, op.as_str(), value),
+            QuartzCondition::Compare { left, op, right } => {
+                format!("Compare({}, {}, {})", left.raw, op.as_str(), right.raw)
+            }
             QuartzCondition::VarExists { variable } => {
                 format!("VarExists({variable})")
             }
@@ -1237,6 +1892,12 @@ impl QuartzCondition {
             QuartzCondition::IsSleeping { target } => {
                 format!("IsSleeping({})", target.short_label())
             }
+            QuartzCondition::IsRotating { target } => {
+                format!("IsRotating({})", target.short_label())
+            }
+            QuartzCondition::IsStill { target } => {
+                format!("IsStill({})", target.short_label())
+            }
             QuartzCondition::SpeedAbove { target, value } => {
                 format!("SpeedAbove({}, {})", target.short_label(), value)
             }
@@ -1244,6 +1905,32 @@ impl QuartzCondition {
                 format!("SpeedBelow({}, {})", target.short_label(), value)
             }
             QuartzCondition::CrystallineEnabled => "CrystallineEnabled".to_owned(),
+            QuartzCondition::EmitterActive { emitter } => {
+                format!("EmitterActive({emitter})")
+            }
+            QuartzCondition::OnPlanet { target, planet } => {
+                format!("OnPlanet({}, {})", target.short_label(), planet.short_label())
+            }
+            QuartzCondition::InGravityField { target, planet } => {
+                format!(
+                    "InGravityField({}, {})",
+                    target.short_label(),
+                    planet.short_label()
+                )
+            }
+            QuartzCondition::HasDominantPlanet { target } => {
+                format!("HasDominantPlanet({})", target.short_label())
+            }
+            QuartzCondition::DominantPlanetIs { target, planet } => {
+                format!(
+                    "DominantPlanetIs({}, {})",
+                    target.short_label(),
+                    planet.short_label()
+                )
+            }
+            QuartzCondition::InAnyGravityField { target } => {
+                format!("InAnyGravityField({})", target.short_label())
+            }
             QuartzCondition::Plugin { name, arg } => {
                 if let Some(arg) = arg {
                     format!("Plugin({}, {})", name, arg)
@@ -1273,15 +1960,27 @@ impl QuartzCondition {
             | QuartzCondition::Grounded { target }
             | QuartzCondition::HasTag { target, .. }
             | QuartzCondition::IsSleeping { target }
+            | QuartzCondition::IsRotating { target }
+            | QuartzCondition::IsStill { target }
             | QuartzCondition::SpeedAbove { target, .. }
-            | QuartzCondition::SpeedBelow { target, .. } => target.collect_object_refs(out),
+            | QuartzCondition::SpeedBelow { target, .. }
+            | QuartzCondition::HasDominantPlanet { target }
+            | QuartzCondition::InAnyGravityField { target } => target.collect_object_refs(out),
+            QuartzCondition::OnPlanet { target, planet }
+            | QuartzCondition::InGravityField { target, planet }
+            | QuartzCondition::DominantPlanetIs { target, planet } => {
+                target.collect_object_refs(out);
+                planet.collect_object_refs(out);
+            }
             QuartzCondition::Always
             | QuartzCondition::KeyHeld { .. }
             | QuartzCondition::KeyNotHeld { .. }
             | QuartzCondition::VarCompare { .. }
+            | QuartzCondition::Compare { .. }
             | QuartzCondition::VarExists { .. }
             | QuartzCondition::Expr { .. }
             | QuartzCondition::CrystallineEnabled
+            | QuartzCondition::EmitterActive { .. }
             | QuartzCondition::Plugin { .. } => {}
         }
     }

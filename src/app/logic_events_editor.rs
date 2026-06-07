@@ -2,8 +2,9 @@ use eframe::egui;
 
 use crate::app::QuartzForgeApp;
 use crate::core::quartz_domain::{
-    CompareOp, LogicNode, QuartzAction, QuartzCondition, QuartzEventKind, QuartzLocationRef,
-    QuartzMouseButtonFilter, QuartzScrollAxisFilter, QuartzTargetRef,
+    CompareOp, LogicNode, ObjectPhysicsMaterialPreset, ObjectPhysicsMaterialSpec, QuartzAction,
+    QuartzCondition, QuartzEventKind, QuartzLocationRef, QuartzMouseButtonFilter,
+    QuartzScrollAxisFilter, QuartzTargetRef,
 };
 
 impl QuartzForgeApp {
@@ -129,6 +130,27 @@ impl QuartzForgeApp {
                 tree_changed = true;
             }
 
+            if ui.button("+ Add ApplyImpulse Action").clicked() {
+                tree.nodes.push(LogicNode::Action(QuartzAction::ApplyImpulse {
+                    target: QuartzTargetRef::Name(default_target_name.clone()),
+                    ix: 0.0,
+                    iy: -12.0,
+                }));
+                tree.refresh_references();
+                tree_changed = true;
+            }
+
+            if ui.button("+ Add SetMaterial Action").clicked() {
+                tree.nodes.push(LogicNode::Action(QuartzAction::SetMaterial {
+                    target: QuartzTargetRef::Name(default_target_name.clone()),
+                    material: ObjectPhysicsMaterialSpec::resolved_defaults(
+                        ObjectPhysicsMaterialPreset::Default,
+                    ),
+                }));
+                tree.refresh_references();
+                tree_changed = true;
+            }
+
             if ui.button("+ Add Var Compare Branch").clicked() {
                 tree.nodes.push(LogicNode::Branch {
                     condition: QuartzCondition::VarCompare {
@@ -170,6 +192,7 @@ impl QuartzForgeApp {
     pub(super) fn events_editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("Events");
         let project_root = self.project_root.clone();
+        let editor_suggestions = self.current_editor_suggestions();
         let event_rows: Vec<String> = self
             .project_state
             .manifest
@@ -396,7 +419,7 @@ impl QuartzForgeApp {
                 if let Some(action) = event.action.as_mut() {
                     ui.separator();
                     ui.label("Event Action");
-                    changed |= Self::edit_action(ui, action);
+                    changed |= Self::edit_action(ui, action, &editor_suggestions);
                 }
             }
 

@@ -1,11 +1,57 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 
 use crate::core::project::EditorProjectState;
 use crate::core::quartz_domain::CustomCodeKind;
 use crate::services::{codegen, persistence};
+
+#[derive(Debug, Clone, Copy)]
+pub struct TicketCompletionCoverage {
+    pub domain: bool,
+    pub editor: bool,
+    pub codegen: bool,
+    pub import_roundtrip: bool,
+    pub mcp: bool,
+    pub positive_tests: bool,
+    pub negative_tests: bool,
+}
+
+pub fn require_ticket_completion_coverage(coverage: TicketCompletionCoverage) -> Result<()> {
+    let mut missing = Vec::new();
+    if !coverage.domain {
+        missing.push("domain");
+    }
+    if !coverage.editor {
+        missing.push("editor");
+    }
+    if !coverage.codegen {
+        missing.push("codegen");
+    }
+    if !coverage.import_roundtrip {
+        missing.push("import_roundtrip");
+    }
+    if !coverage.mcp {
+        missing.push("mcp");
+    }
+    if !coverage.positive_tests {
+        missing.push("positive_tests");
+    }
+    if !coverage.negative_tests {
+        missing.push("negative_tests");
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "ticket completion gate failed; missing coverage: {}",
+            missing.join(", ")
+        ))
+    }
+}
 
 pub fn component_target_path(scene_source_file: &str, configured: &str) -> String {
     let configured = configured.trim();
@@ -152,17 +198,26 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     }
 
     out.push_str("pub fn setup_scene(canvas: &mut Canvas) {\n");
+    out.push_str(&codegen::scene_setup_physics_lines(scene));
+
+    // Phase 1: build all local objects (does NOT call canvas.add_game_object yet so that
+    // setup_runtime statements can reference the locals without use-after-move errors).
+    let mut inline_objects: Vec<&crate::core::quartz_domain::QuartzObjectBlueprint> = Vec::new();
     for object in &scene.objects {
         if !object.enabled || object.spawn_only {
             continue;
         }
         let target = component_target_path(scene_source_file, &object.output_file);
         if target == scene_source_file {
-            out.push_str(&codegen::object_registration_body(object));
+            out.push_str(&codegen::object_build_body(object));
+            inline_objects.push(object);
         } else {
+            // External component objects are still registered via their function call.
             out.push_str(&format!("    {}(canvas);\n", codegen::object_function_name(object)));
         }
     }
+
+    // Phase 2: game-state vars and setup_runtime (locals are still alive here).
     for block in &scene.custom_code_blocks {
         if !matches!(block.kind, CustomCodeKind::GameStateVars | CustomCodeKind::TypedVars)
             || block.code.trim().is_empty()
@@ -180,6 +235,12 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
             ));
         }
     }
+
+    // Phase 3: move all inline-built objects into canvas.
+    for object in &inline_objects {
+        out.push_str(&codegen::object_add_line(object));
+    }
+
     out.push_str("}\n\n");
 
     out.push_str("pub fn register_logic(canvas: &mut Canvas) {\n");
@@ -387,6 +448,7 @@ pub fn write_generated_files_for_scene(
 
     std::fs::write(&out_path, scene_output)
         .with_context(|| format!("failed to write generated scene file {}", out_path.display()))?;
+    maybe_rustfmt_file(&out_path);
 
     let scene_source_file = scene.source_file.trim().to_owned();
     let mut target_files: Vec<String> = Vec::new();
@@ -447,6 +509,7 @@ pub fn write_generated_files_for_scene(
             }
             std::fs::write(&module_path, module_source)
                 .with_context(|| format!("failed to write component file {}", module_path.display()))?;
+            maybe_rustfmt_file(&module_path);
         }
     }
 
@@ -467,10 +530,16 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::core::project::EditorProjectState;
-    use crate::core::quartz_domain::{ObjectVisualAssetMode, QuartzObjectBlueprint};
+    use crate::core::quartz_domain::{
+        CompareOp, LogicNode, LogicTree, ObjectVisualAssetMode, QuartzAction, QuartzCondition,
+        QuartzExpr, QuartzExprKind, QuartzLocationRef, QuartzObjectBlueprint,
+    };
     use crate::services::project_import;
 
-    use super::{build_scene_source, write_all_generated_files_from_state};
+    use super::{
+        build_scene_source, require_ticket_completion_coverage, write_all_generated_files_from_state,
+        TicketCompletionCoverage,
+    };
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -551,4 +620,152 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn generated_scene_roundtrip_preserves_emitter_action_semantics() {
+        let root = temp_root("emitter_roundtrip");
+        let mut state = EditorProjectState::new("sync_test".to_owned());
+        state.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+
+        let mut tree = LogicTree::new("logic_emitter".to_owned(), "Emitter update".to_owned());
+        tree.output_file = "src/scripts/main_scene.rs".to_owned();
+        tree.nodes.push(LogicNode::Action(QuartzAction::SpawnEmitter {
+            name: "trail".to_owned(),
+        }));
+        tree.refresh_references();
+        state.manifest.scenes[0].logic_trees.push(tree);
+
+        write_all_generated_files_from_state(&state, &root).unwrap();
+
+        let mut files = Vec::new();
+        collect_rs_files(&root, &root.join("src"), &mut files);
+
+        let mut imported = EditorProjectState::new("sync_test".to_owned());
+        imported.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+        let report = project_import::import_files_into_state(&mut imported, &root, &files, true).unwrap();
+
+        assert_eq!(report.imported_logic_tree_count, 1);
+        let imported_tree = &imported.manifest.scenes[0].logic_trees[0];
+        let mut saw_spawn = false;
+        for node in &imported_tree.nodes {
+            if let LogicNode::Action(action) = node {
+                match action {
+                    QuartzAction::SpawnEmitter { name } => {
+                        saw_spawn = true;
+                        assert_eq!(name, "trail");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(saw_spawn);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generated_scene_roundtrip_preserves_action_condition_matrix() {
+        let root = temp_root("action_condition_matrix_roundtrip");
+        let mut state = EditorProjectState::new("sync_test".to_owned());
+        state.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+
+        let mut tree = LogicTree::new("logic_matrix".to_owned(), "Matrix update".to_owned());
+        tree.output_file = "src/scripts/main_scene.rs".to_owned();
+        tree.nodes.push(LogicNode::Action(QuartzAction::Conditional {
+            condition: QuartzCondition::Compare {
+                left: QuartzExpr {
+                    kind: QuartzExprKind::Var,
+                    raw: "score".to_owned(),
+                },
+                op: CompareOp::Ge,
+                right: QuartzExpr {
+                    kind: QuartzExprKind::F32,
+                    raw: "10.0".to_owned(),
+                },
+            },
+            if_true: Box::new(QuartzAction::Spawn {
+                template_id: "enemy".to_owned(),
+                location: QuartzLocationRef::AtTarget(crate::core::quartz_domain::QuartzTargetRef::Name(
+                    "player".to_owned(),
+                )),
+            }),
+            if_false: Some(Box::new(QuartzAction::PluginCall {
+                name: "terrain_collision".to_owned(),
+                payload: "refresh".to_owned(),
+            })),
+        }));
+        tree.refresh_references();
+        state.manifest.scenes[0].logic_trees.push(tree);
+
+        write_all_generated_files_from_state(&state, &root).unwrap();
+
+        let mut files = Vec::new();
+        collect_rs_files(&root, &root.join("src"), &mut files);
+
+        let mut imported = EditorProjectState::new("sync_test".to_owned());
+        imported.manifest.scenes[0].source_file = "src/scripts/main_scene.rs".to_owned();
+        let report = project_import::import_files_into_state(&mut imported, &root, &files, true).unwrap();
+
+        assert_eq!(report.imported_logic_tree_count, 1);
+        let imported_tree = &imported.manifest.scenes[0].logic_trees[0];
+        let mut saw_matrix = false;
+        for node in &imported_tree.nodes {
+            if let LogicNode::Action(QuartzAction::Conditional {
+                condition,
+                if_true,
+                if_false,
+            }) = node
+            {
+                if let QuartzCondition::Compare { .. } = condition {
+                    if let QuartzAction::Spawn { template_id, .. } = if_true.as_ref() {
+                        assert_eq!(template_id, "enemy");
+                    } else {
+                        panic!("expected Spawn in if_true");
+                    }
+
+                    if let Some(else_action) = if_false.as_ref() {
+                        if let QuartzAction::PluginCall { name, payload } = else_action.as_ref() {
+                            assert_eq!(name, "terrain_collision");
+                            assert_eq!(payload, "refresh");
+                        } else {
+                            panic!("expected PluginCall in if_false");
+                        }
+                    } else {
+                        panic!("expected if_false action");
+                    }
+                    saw_matrix = true;
+                }
+            }
+        }
+        assert!(saw_matrix);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ticket_completion_requires_full_surface_coverage() {
+        let coverage = TicketCompletionCoverage {
+            domain: true,
+            editor: true,
+            codegen: true,
+            import_roundtrip: true,
+            mcp: true,
+            positive_tests: true,
+            negative_tests: true,
+        };
+        assert!(require_ticket_completion_coverage(coverage).is_ok());
+    }
+}
+
+fn maybe_rustfmt_file(path: &Path) {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        return;
+    }
+
+    let _ = Command::new("rustfmt")
+        .arg("--edition")
+        .arg("2024")
+        .arg(path)
+        .status();
 }

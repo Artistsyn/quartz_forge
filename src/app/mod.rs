@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,13 +9,19 @@ mod condition_editor;
 mod logic_events_editor;
 mod syntax_highlight;
 
-use eframe::egui::{self, Align2, Color32, Key, Pos2, Rect, RichText, Sense, Slider, Stroke, TextEdit};
+use eframe::egui::{
+    self, Align2, Color32, DragValue, Key, Pos2, Rect, RichText, Sense, Slider, Stroke,
+    TextEdit,
+};
 use image::AnimationDecoder;
 
 use crate::core::project::{EditorProjectState, SceneDocument, SceneKind};
 use crate::core::quartz_domain::{
-    CanvasOrientation, CustomCodeKind, ObjectPhysicsMaterialPreset, ObjectTemplate,
-    QuartzGravityFalloff,
+    CanvasOrientation, CrystallineConfigProfile, CrystallineQuality, CustomCodeKind,
+    LogicNode,
+    ObjectPhysicsMaterialPreset, ObjectTemplate,
+    QuartzAction, QuartzCondition, QuartzExpr, QuartzExprKind, QuartzEventBinding,
+    QuartzGravityFalloff, QuartzObjectCollisionMode,
     ObjectVisualAssetMode, SceneCanvasSpec,
 };
 use crate::services::codegen;
@@ -59,12 +65,85 @@ struct CameraViewDrag {
     start_y: f32,
 }
 
+const COLLISION_LAYER_FLAGS: [(&str, u32); 8] = [
+    ("DEFAULT", 1 << 0),
+    ("PLAYER", 1 << 1),
+    ("ENEMY", 1 << 2),
+    ("PROJECTILE", 1 << 3),
+    ("PICKUP", 1 << 4),
+    ("TRIGGER", 1 << 5),
+    ("TERRAIN", 1 << 6),
+    ("PARTICLE", 1 << 7),
+];
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct EditorSuggestions {
+    pub variable_names: Vec<String>,
+    pub constant_names: Vec<String>,
+    pub expression_names: Vec<String>,
+}
+
+fn collision_mask_editor(ui: &mut egui::Ui, label: &str, value: &mut u32) -> bool {
+    let mut changed = false;
+    ui.label(label);
+    ui.horizontal(|ui| {
+        if ui.button("none").clicked() {
+            *value = 0;
+            changed = true;
+        }
+        if ui.button("all").clicked() {
+            *value = u32::MAX;
+            changed = true;
+        }
+        changed |= ui
+            .add(DragValue::new(value).range(0..=u32::MAX).speed(1.0).prefix("bits "))
+            .changed();
+    });
+
+    for (name, bit) in COLLISION_LAYER_FLAGS {
+        let mut enabled = (*value & bit) != 0;
+        if ui.checkbox(&mut enabled, format!("{}", name)).changed() {
+            if enabled {
+                *value |= bit;
+            } else {
+                *value &= !bit;
+            }
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelperVarType {
     I32,
     F32,
     Bool,
     Str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuggestionPickerCategory {
+    Variables,
+    Constants,
+    Expressions,
+    Actions,
+    Conditions,
+    Events,
+}
+
+impl SuggestionPickerCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            SuggestionPickerCategory::Variables => "Variables",
+            SuggestionPickerCategory::Constants => "Constants",
+            SuggestionPickerCategory::Expressions => "Expressions",
+            SuggestionPickerCategory::Actions => "Actions",
+            SuggestionPickerCategory::Conditions => "Conditions",
+            SuggestionPickerCategory::Events => "Events",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +234,14 @@ pub struct QuartzForgeApp {
     show_typed_vars_window: bool,
     show_custom_events_window: bool,
     show_update_loops_window: bool,
+    show_other_custom_code_window: bool,
+    dock_constants_window: bool,
+    dock_game_state_window: bool,
+    dock_typed_vars_window: bool,
+    dock_custom_events_window: bool,
+    dock_update_loops_window: bool,
+    dock_other_custom_code_window: bool,
+    dock_top_level_window: bool,
     show_background_designer_window: bool,
     show_top_level_window: bool,
     show_file_browser_window: bool,
@@ -196,6 +283,10 @@ pub struct QuartzForgeApp {
     grapple_bias: GrappleBiasOption,
     preview_refresh_pending: bool,
     last_preview_refresh_at: Option<Instant>,
+    suggestion_picker_open: bool,
+    suggestion_picker_filter: String,
+    suggestion_picker_category: SuggestionPickerCategory,
+    suggestion_picker_target_block_id: String,
 }
 
 impl Default for QuartzForgeApp {
@@ -232,6 +323,14 @@ impl Default for QuartzForgeApp {
             show_typed_vars_window: false,
             show_custom_events_window: false,
             show_update_loops_window: false,
+            show_other_custom_code_window: false,
+            dock_constants_window: false,
+            dock_game_state_window: false,
+            dock_typed_vars_window: false,
+            dock_custom_events_window: false,
+            dock_update_loops_window: false,
+            dock_other_custom_code_window: false,
+            dock_top_level_window: false,
             show_background_designer_window: false,
             show_top_level_window: false,
             show_file_browser_window: false,
@@ -273,11 +372,351 @@ impl Default for QuartzForgeApp {
             grapple_bias: GrappleBiasOption::None,
             preview_refresh_pending: false,
             last_preview_refresh_at: None,
+            suggestion_picker_open: false,
+            suggestion_picker_filter: String::new(),
+            suggestion_picker_category: SuggestionPickerCategory::Actions,
+            suggestion_picker_target_block_id: String::new(),
         }
     }
 }
 
 impl QuartzForgeApp {
+    fn current_editor_suggestions(&self) -> EditorSuggestions {
+        let Some(scene) = self
+            .project_state
+            .manifest
+            .scenes
+            .get(self.project_state.active_scene_index)
+        else {
+            return EditorSuggestions::default();
+        };
+
+        let mut variable_names = BTreeSet::new();
+        let mut constant_names = BTreeSet::new();
+
+        for tree in &scene.logic_trees {
+            for node in &tree.nodes {
+                Self::collect_logic_node_variable_names(node, &mut variable_names);
+            }
+        }
+
+        for event in &scene.events {
+            Self::collect_event_variable_names(event, &mut variable_names);
+        }
+
+        for block in &scene.custom_code_blocks {
+            Self::collect_code_symbol_suggestions(&block.code, &mut variable_names, &mut constant_names);
+        }
+
+        let mut expression_names = variable_names.clone();
+        expression_names.extend(constant_names.iter().cloned());
+
+        EditorSuggestions {
+            variable_names: variable_names.into_iter().collect(),
+            constant_names: constant_names.into_iter().collect(),
+            expression_names: expression_names.into_iter().collect(),
+        }
+    }
+
+    fn collect_logic_node_variable_names(node: &LogicNode, out: &mut BTreeSet<String>) {
+        match node {
+            LogicNode::Action(action) => Self::collect_action_variable_names(action, out),
+            LogicNode::Branch {
+                condition,
+                then_nodes,
+                else_nodes,
+            } => {
+                Self::collect_condition_variable_names(condition, out);
+                for node in then_nodes {
+                    Self::collect_logic_node_variable_names(node, out);
+                }
+                for node in else_nodes {
+                    Self::collect_logic_node_variable_names(node, out);
+                }
+            }
+        }
+    }
+
+    fn collect_event_variable_names(event: &QuartzEventBinding, out: &mut BTreeSet<String>) {
+        if let Some(action) = &event.action {
+            Self::collect_action_variable_names(action, out);
+        }
+    }
+
+    fn collect_action_variable_names(action: &QuartzAction, out: &mut BTreeSet<String>) {
+        match action {
+            QuartzAction::SetVar { name, value } => {
+                Self::insert_suggestion(out, name);
+                Self::collect_expr_variable_names(value, out);
+            }
+            QuartzAction::ModVar { name, operand, .. } => {
+                Self::insert_suggestion(out, name);
+                Self::collect_expr_variable_names(operand, out);
+            }
+            QuartzAction::Conditional {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                Self::collect_condition_variable_names(condition, out);
+                Self::collect_action_variable_names(if_true, out);
+                if let Some(if_false) = if_false.as_deref() {
+                    Self::collect_action_variable_names(if_false, out);
+                }
+            }
+            QuartzAction::Multi { actions } => {
+                for action in actions {
+                    Self::collect_action_variable_names(action, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_condition_variable_names(condition: &QuartzCondition, out: &mut BTreeSet<String>) {
+        match condition {
+            QuartzCondition::VarCompare { variable, .. }
+            | QuartzCondition::VarExists { variable } => {
+                Self::insert_suggestion(out, variable);
+            }
+            QuartzCondition::Compare { left, right, .. } => {
+                Self::collect_expr_variable_names(left, out);
+                Self::collect_expr_variable_names(right, out);
+            }
+            QuartzCondition::And { left, right } | QuartzCondition::Or { left, right } => {
+                Self::collect_condition_variable_names(left, out);
+                Self::collect_condition_variable_names(right, out);
+            }
+            QuartzCondition::Not { inner } => {
+                Self::collect_condition_variable_names(inner, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_expr_variable_names(expr: &QuartzExpr, out: &mut BTreeSet<String>) {
+        if expr.kind == QuartzExprKind::Var {
+            Self::insert_suggestion(out, &expr.raw);
+        }
+    }
+
+    fn collect_code_symbol_suggestions(
+        code: &str,
+        variable_names: &mut BTreeSet<String>,
+        constant_names: &mut BTreeSet<String>,
+    ) {
+        for line in code.lines() {
+            if let Some(name) = Self::parse_const_name_from_line(line) {
+                constant_names.insert(name);
+            }
+        }
+
+        for needle in [
+            "set_var(",
+            "get_var(",
+            "get_i32(",
+            "get_f32(",
+            "get_bool(",
+            "get_string(",
+            "has_var(",
+            "remove_var(",
+            "modify_i32(",
+            "modify_f32(",
+            "modify_bool(",
+            "modify_str(",
+        ] {
+            let mut rest = code;
+            while let Some(idx) = rest.find(needle) {
+                rest = &rest[idx + needle.len()..];
+                if let Some(name) = Self::parse_string_literal_arg(rest) {
+                    variable_names.insert(name);
+                }
+            }
+        }
+    }
+
+    fn parse_const_name_from_line(line: &str) -> Option<String> {
+        let idx = line.find("const ")?;
+        let tail = &line[idx + "const ".len()..];
+        let ident: String = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        if ident.is_empty() {
+            None
+        } else {
+            Some(ident)
+        }
+    }
+
+    fn parse_string_literal_arg(src: &str) -> Option<String> {
+        let start = src.find('"')? + 1;
+        let tail = &src[start..];
+        let end = tail.find('"')?;
+        let value = tail[..end].trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_owned())
+        }
+    }
+
+    fn insert_suggestion(out: &mut BTreeSet<String>, value: &str) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            out.insert(trimmed.to_owned());
+        }
+    }
+
+    fn suggestion_text_edit(
+        ui: &mut egui::Ui,
+        id_source: impl std::hash::Hash,
+        value: &mut String,
+        suggestions: &[String],
+    ) -> bool {
+        if suggestions.is_empty() {
+            return ui.text_edit_singleline(value).changed();
+        }
+
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(id_source)
+                .selected_text(if value.trim().is_empty() {
+                    "suggest"
+                } else {
+                    value.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    for suggestion in suggestions {
+                        changed |= ui
+                            .selectable_value(value, suggestion.clone(), suggestion)
+                            .changed();
+                    }
+                });
+            changed |= ui.text_edit_singleline(value).changed();
+        });
+        changed
+    }
+
+    fn suggestion_picker_entries(
+        kind: CustomCodeKind,
+        category: SuggestionPickerCategory,
+        editor_suggestions: &EditorSuggestions,
+    ) -> Vec<String> {
+        match category {
+            SuggestionPickerCategory::Variables => editor_suggestions.variable_names.clone(),
+            SuggestionPickerCategory::Constants => editor_suggestions.constant_names.clone(),
+            SuggestionPickerCategory::Expressions => editor_suggestions.expression_names.clone(),
+            SuggestionPickerCategory::Actions => {
+                let mut out = vec![
+                    "canvas.run(Action::show(Target::name(\"player\")));".to_owned(),
+                    "canvas.run(Action::hide(Target::name(\"player\")));".to_owned(),
+                    "canvas.run(Action::teleport(Target::name(\"player\"), Location::at(0.0, 0.0)));"
+                        .to_owned(),
+                    "canvas.run(Action::apply_momentum(Target::name(\"player\"), 0.0, -12.0));"
+                        .to_owned(),
+                    "canvas.run(Action::smooth_zoom(1.1));".to_owned(),
+                ];
+                if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents) {
+                    out.push("canvas.run(Action::custom(\"event_name\"));".to_owned());
+                }
+                out
+            }
+            SuggestionPickerCategory::Conditions => vec![
+                "Condition::VarExists(\"score\".to_owned())".to_owned(),
+                "Condition::KeyHeld(Key::Space)".to_owned(),
+                "Condition::Plugin { name: \"save_game\".to_owned(), arg: Some(\"slot_exists:slot1\".to_owned()) }"
+                    .to_owned(),
+            ],
+            SuggestionPickerCategory::Events => vec![
+                "canvas.run(Action::custom(\"spawn_wave\"));".to_owned(),
+                "canvas.register_custom_event(\"spawn_wave\".to_owned(), |canvas| {\n    // body\n});"
+                    .to_owned(),
+            ],
+        }
+    }
+
+    fn show_suggestion_picker_window(
+        &mut self,
+        ctx: &egui::Context,
+        kind: CustomCodeKind,
+        editor_suggestions: &EditorSuggestions,
+    ) -> Option<String> {
+        if !self.suggestion_picker_open {
+            return None;
+        }
+
+        let mut picked = None;
+        let mut open = self.suggestion_picker_open;
+        egui::Window::new("Smart Suggestions (Ctrl+Space)")
+            .id(egui::Id::new("smart_suggestion_picker"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(560.0, 420.0))
+            .show(ctx, |ui| {
+                ui.label("Pick a category, filter, then click a suggestion to insert it.");
+                ui.horizontal_wrapped(|ui| {
+                    for category in [
+                        SuggestionPickerCategory::Variables,
+                        SuggestionPickerCategory::Constants,
+                        SuggestionPickerCategory::Expressions,
+                        SuggestionPickerCategory::Actions,
+                        SuggestionPickerCategory::Conditions,
+                        SuggestionPickerCategory::Events,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.suggestion_picker_category,
+                            category,
+                            category.as_str(),
+                        );
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("filter");
+                    ui.text_edit_singleline(&mut self.suggestion_picker_filter);
+                });
+
+                let entries = Self::suggestion_picker_entries(
+                    kind,
+                    self.suggestion_picker_category,
+                    editor_suggestions,
+                );
+                let filter = self.suggestion_picker_filter.to_ascii_lowercase();
+                egui::ScrollArea::vertical()
+                    .id_salt("smart_suggestion_picker_scroll")
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        for entry in entries {
+                            if !filter.trim().is_empty()
+                                && !entry.to_ascii_lowercase().contains(filter.trim())
+                            {
+                                continue;
+                            }
+                            if ui.selectable_label(false, &entry).clicked() {
+                                picked = Some(entry);
+                            }
+                        }
+                    });
+            });
+
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            open = false;
+        }
+        if picked.is_some() {
+            open = false;
+        }
+
+        self.suggestion_picker_open = open;
+        if !self.suggestion_picker_open {
+            self.suggestion_picker_target_block_id.clear();
+            self.suggestion_picker_filter.clear();
+        }
+
+        picked
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             if ui.button("New Project").clicked() {
@@ -289,9 +728,15 @@ impl QuartzForgeApp {
             if ui.button("Save").clicked() {
                 self.save_project();
             }
+            if ui.button("Manual Semantic Reimport").clicked() {
+                self.manual_semantic_reimport();
+            }
             if ui.button("Generate Quartz Preview").clicked() {
                 self.quartz_preview = self.build_scene_source();
                 self.status_line = "Quartz API preview regenerated from active scene.".to_owned();
+            }
+            if ui.button("Pre-Generate Roundtrip Check").clicked() {
+                self.pre_generate_roundtrip_check();
             }
             if ui.button("Write Generated Script").clicked() {
                 self.write_generated_script();
@@ -500,6 +945,58 @@ impl QuartzForgeApp {
         canvas_changed |= ui.checkbox(&mut scene.canvas.show_camera_frame, "show camera frame overlay").changed();
         canvas_changed |= ui.checkbox(&mut scene.canvas.show_grid, "show scene grid").changed();
         canvas_changed |= ui.checkbox(&mut scene.canvas.show_background_cells, "show background cells").changed();
+        canvas_changed |= ui
+            .checkbox(&mut scene.canvas.crystalline_enabled, "enable crystalline physics")
+            .changed();
+        if scene.canvas.crystalline_enabled {
+            ui.horizontal(|ui| {
+                ui.label("crystalline profile");
+                canvas_changed |= ui
+                    .selectable_value(
+                        &mut scene.canvas.crystalline_profile,
+                        CrystallineConfigProfile::Platformer,
+                        "platformer",
+                    )
+                    .changed();
+                canvas_changed |= ui
+                    .selectable_value(
+                        &mut scene.canvas.crystalline_profile,
+                        CrystallineConfigProfile::Floaty,
+                        "floaty",
+                    )
+                    .changed();
+                canvas_changed |= ui
+                    .selectable_value(
+                        &mut scene.canvas.crystalline_profile,
+                        CrystallineConfigProfile::Realistic,
+                        "realistic",
+                    )
+                    .changed();
+                canvas_changed |= ui
+                    .selectable_value(
+                        &mut scene.canvas.crystalline_profile,
+                        CrystallineConfigProfile::Arcade,
+                        "arcade",
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("crystalline quality");
+                canvas_changed |= ui
+                    .selectable_value(&mut scene.canvas.crystalline_quality, CrystallineQuality::Low, "low")
+                    .changed();
+                canvas_changed |= ui
+                    .selectable_value(
+                        &mut scene.canvas.crystalline_quality,
+                        CrystallineQuality::Medium,
+                        "medium",
+                    )
+                    .changed();
+                canvas_changed |= ui
+                    .selectable_value(&mut scene.canvas.crystalline_quality, CrystallineQuality::High, "high")
+                    .changed();
+            });
+        }
         let bg_snap_toggle_changed = ui
             .checkbox(
                 &mut scene.canvas.snap_background_objects_to_cells,
@@ -538,7 +1035,7 @@ impl QuartzForgeApp {
 
         ui.separator();
         ui.label("Quartz Forge Contract");
-        ui.label("- Scene and logic scripts live in /src/scripts");
+        ui.label("- Scene entry files live in /src/scenes and component scripts can live in /src/scripts");
         ui.label("- Asset roots live in /assets/*");
         ui.label("- Preview runner targets the project root crate");
     }
@@ -566,13 +1063,49 @@ impl QuartzForgeApp {
                     Self::set_window_open_state(ui.ctx(), egui::Id::new("event_builder_window"), true);
                 }
             }
-            ui.checkbox(&mut self.show_constants_window, "constants window");
-            ui.checkbox(&mut self.show_game_state_window, "game state vars window");
-            ui.checkbox(&mut self.show_typed_vars_window, "typed vars window");
-            ui.checkbox(&mut self.show_custom_events_window, "custom events window");
-            ui.checkbox(&mut self.show_update_loops_window, "update loops window");
+            if ui.checkbox(&mut self.show_constants_window, "constants window").changed() {
+                self.dock_constants_window = false;
+                if self.show_constants_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_constants"), true);
+                }
+            }
+            if ui.checkbox(&mut self.show_game_state_window, "game state vars window").changed() {
+                self.dock_game_state_window = false;
+                if self.show_game_state_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_game_state"), true);
+                }
+            }
+            if ui.checkbox(&mut self.show_typed_vars_window, "typed vars window").changed() {
+                self.dock_typed_vars_window = false;
+                if self.show_typed_vars_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_typed_vars"), true);
+                }
+            }
+            if ui.checkbox(&mut self.show_custom_events_window, "custom events window").changed() {
+                self.dock_custom_events_window = false;
+                if self.show_custom_events_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_custom_events"), true);
+                }
+            }
+            if ui.checkbox(&mut self.show_update_loops_window, "update loops window").changed() {
+                self.dock_update_loops_window = false;
+                if self.show_update_loops_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_update_loops"), true);
+                }
+            }
+            if ui.checkbox(&mut self.show_other_custom_code_window, "other custom code window").changed() {
+                self.dock_other_custom_code_window = false;
+                if self.show_other_custom_code_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_other"), true);
+                }
+            }
             ui.checkbox(&mut self.show_background_designer_window, "background designer window");
-            ui.checkbox(&mut self.show_top_level_window, "top level window");
+            if ui.checkbox(&mut self.show_top_level_window, "top level window").changed() {
+                self.dock_top_level_window = false;
+                if self.show_top_level_window {
+                    Self::set_window_open_state(ui.ctx(), egui::Id::new("custom_code_window_top_level"), true);
+                }
+            }
             ui.checkbox(&mut self.show_file_browser_window, "file browser window");
             ui.checkbox(&mut self.show_grapple_wizard_window, "grapple wizard window");
         });
@@ -659,26 +1192,63 @@ impl QuartzForgeApp {
             }
         }
 
-        if self.show_constants_window {
-            self.custom_code_window(ctx, CustomCodeKind::Constants, "Constants");
+        let constants_window_id = egui::Id::new("custom_code_window_constants");
+        if self.show_constants_window && !self.dock_constants_window {
+            self.custom_code_window(ctx, constants_window_id, CustomCodeKind::Constants, "Constants");
+            if Self::window_is_collapsed(ctx, constants_window_id) {
+                self.dock_constants_window = true;
+            }
         }
-        if self.show_game_state_window {
-            self.custom_code_window(ctx, CustomCodeKind::GameStateVars, "GameState Vars");
+
+        let game_state_window_id = egui::Id::new("custom_code_window_game_state");
+        if self.show_game_state_window && !self.dock_game_state_window {
+            self.custom_code_window(ctx, game_state_window_id, CustomCodeKind::GameStateVars, "GameState Vars");
+            if Self::window_is_collapsed(ctx, game_state_window_id) {
+                self.dock_game_state_window = true;
+            }
         }
-        if self.show_typed_vars_window {
-            self.custom_code_window(ctx, CustomCodeKind::TypedVars, "Typed Vars");
+
+        let typed_vars_window_id = egui::Id::new("custom_code_window_typed_vars");
+        if self.show_typed_vars_window && !self.dock_typed_vars_window {
+            self.custom_code_window(ctx, typed_vars_window_id, CustomCodeKind::TypedVars, "Typed Vars");
+            if Self::window_is_collapsed(ctx, typed_vars_window_id) {
+                self.dock_typed_vars_window = true;
+            }
         }
-        if self.show_custom_events_window {
-            self.custom_code_window(ctx, CustomCodeKind::CustomEvents, "Custom Events");
+
+        let custom_events_window_id = egui::Id::new("custom_code_window_custom_events");
+        if self.show_custom_events_window && !self.dock_custom_events_window {
+            self.custom_code_window(ctx, custom_events_window_id, CustomCodeKind::CustomEvents, "Custom Events");
+            if Self::window_is_collapsed(ctx, custom_events_window_id) {
+                self.dock_custom_events_window = true;
+            }
         }
-        if self.show_update_loops_window {
-            self.custom_code_window(ctx, CustomCodeKind::UpdateLoops, "Update Loops");
+
+        let update_loops_window_id = egui::Id::new("custom_code_window_update_loops");
+        if self.show_update_loops_window && !self.dock_update_loops_window {
+            self.custom_code_window(ctx, update_loops_window_id, CustomCodeKind::UpdateLoops, "Update Loops");
+            if Self::window_is_collapsed(ctx, update_loops_window_id) {
+                self.dock_update_loops_window = true;
+            }
+        }
+
+        let other_window_id = egui::Id::new("custom_code_window_other");
+        if self.show_other_custom_code_window && !self.dock_other_custom_code_window {
+            self.custom_code_other_window(ctx, other_window_id, "Other Custom Code");
+            if Self::window_is_collapsed(ctx, other_window_id) {
+                self.dock_other_custom_code_window = true;
+            }
         }
         if self.show_background_designer_window {
             self.background_designer_window(ctx);
         }
-        if self.show_top_level_window {
-            self.custom_code_window(ctx, CustomCodeKind::TopLevel, "Top Level Code");
+
+        let top_level_window_id = egui::Id::new("custom_code_window_top_level");
+        if self.show_top_level_window && !self.dock_top_level_window {
+            self.custom_code_window(ctx, top_level_window_id, CustomCodeKind::TopLevel, "Top Level Code");
+            if Self::window_is_collapsed(ctx, top_level_window_id) {
+                self.dock_top_level_window = true;
+            }
         }
         if self.show_file_browser_window {
             self.generated_file_browser_window(ctx);
@@ -712,7 +1282,14 @@ impl QuartzForgeApp {
 
     fn floating_window_dock_tray(&mut self, ctx: &egui::Context) {
         if !((self.show_object_menu_window && self.dock_object_menu_window)
-            || (self.show_event_builder_window && self.dock_event_builder_window))
+            || (self.show_event_builder_window && self.dock_event_builder_window)
+            || (self.show_constants_window && self.dock_constants_window)
+            || (self.show_game_state_window && self.dock_game_state_window)
+            || (self.show_typed_vars_window && self.dock_typed_vars_window)
+            || (self.show_custom_events_window && self.dock_custom_events_window)
+            || (self.show_update_loops_window && self.dock_update_loops_window)
+            || (self.show_other_custom_code_window && self.dock_other_custom_code_window)
+            || (self.show_top_level_window && self.dock_top_level_window))
         {
             return;
         }
@@ -738,6 +1315,55 @@ impl QuartzForgeApp {
                             {
                                 self.dock_event_builder_window = false;
                                 Self::set_window_open_state(ctx, egui::Id::new("event_builder_window"), true);
+                            }
+                            if self.show_constants_window
+                                && self.dock_constants_window
+                                && ui.button("Constants").clicked()
+                            {
+                                self.dock_constants_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_constants"), true);
+                            }
+                            if self.show_game_state_window
+                                && self.dock_game_state_window
+                                && ui.button("GameState Vars").clicked()
+                            {
+                                self.dock_game_state_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_game_state"), true);
+                            }
+                            if self.show_typed_vars_window
+                                && self.dock_typed_vars_window
+                                && ui.button("Typed Vars").clicked()
+                            {
+                                self.dock_typed_vars_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_typed_vars"), true);
+                            }
+                            if self.show_custom_events_window
+                                && self.dock_custom_events_window
+                                && ui.button("Custom Events").clicked()
+                            {
+                                self.dock_custom_events_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_custom_events"), true);
+                            }
+                            if self.show_update_loops_window
+                                && self.dock_update_loops_window
+                                && ui.button("Update Loops").clicked()
+                            {
+                                self.dock_update_loops_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_update_loops"), true);
+                            }
+                            if self.show_other_custom_code_window
+                                && self.dock_other_custom_code_window
+                                && ui.button("Other Custom Code").clicked()
+                            {
+                                self.dock_other_custom_code_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_other"), true);
+                            }
+                            if self.show_top_level_window
+                                && self.dock_top_level_window
+                                && ui.button("Top Level Code").clicked()
+                            {
+                                self.dock_top_level_window = false;
+                                Self::set_window_open_state(ctx, egui::Id::new("custom_code_window_top_level"), true);
                             }
                         });
                     });
@@ -2320,11 +2946,31 @@ impl QuartzForgeApp {
     }
 
     fn collect_rs_files(root: &Path) -> Vec<String> {
+        fn should_skip_dir(path: &Path, root: &Path) -> bool {
+            if path == root {
+                return false;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            rel == "target"
+                || rel.starts_with("target/")
+                || rel == ".git"
+                || rel.starts_with(".git/")
+                || rel == ".quartz_forge"
+                || rel.starts_with(".quartz_forge/")
+        }
+
         fn visit(dir: &Path, root: &Path, out: &mut Vec<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else { return; };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
+                    if should_skip_dir(&path, root) {
+                        continue;
+                    }
                     visit(&path, root, out);
                 } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
                     if let Ok(rel) = path.strip_prefix(root) {
@@ -2335,10 +2981,49 @@ impl QuartzForgeApp {
         }
 
         let mut files = Vec::new();
-        visit(root, root, &mut files);
+        for scoped in [root.join("src"), root.join("tests")] {
+            if scoped.exists() {
+                visit(&scoped, root, &mut files);
+            }
+        }
         files.sort();
         files.dedup();
         files
+    }
+
+    fn collect_manifest_referenced_rs_files(&self, root: &Path) -> Vec<String> {
+        let mut refs = BTreeSet::new();
+
+        for scene in &self.project_state.manifest.scenes {
+            if scene.source_file.ends_with(".rs") {
+                refs.insert(scene.source_file.clone());
+            }
+
+            for object in &scene.objects {
+                if object.output_file.ends_with(".rs") {
+                    refs.insert(object.output_file.clone());
+                }
+            }
+            for tree in &scene.logic_trees {
+                if tree.output_file.ends_with(".rs") {
+                    refs.insert(tree.output_file.clone());
+                }
+            }
+            for event in &scene.events {
+                if event.output_file.ends_with(".rs") {
+                    refs.insert(event.output_file.clone());
+                }
+            }
+            for block in &scene.custom_code_blocks {
+                if block.output_file.ends_with(".rs") {
+                    refs.insert(block.output_file.clone());
+                }
+            }
+        }
+
+        refs.into_iter()
+            .filter(|rel| root.join(rel).is_file())
+            .collect()
     }
 
     fn collect_asset_files(root: &Path) -> Vec<String> {
@@ -2346,11 +3031,31 @@ impl QuartzForgeApp {
             matches!(ext, "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif")
         }
 
+        fn should_skip_dir(path: &Path, root: &Path) -> bool {
+            if path == root {
+                return false;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            rel == "target"
+                || rel.starts_with("target/")
+                || rel == ".git"
+                || rel.starts_with(".git/")
+                || rel == ".quartz_forge"
+                || rel.starts_with(".quartz_forge/")
+        }
+
         fn visit(dir: &Path, root: &Path, out: &mut Vec<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else { return; };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
+                    if should_skip_dir(&path, root) {
+                        continue;
+                    }
                     visit(&path, root, out);
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     if is_asset_extension(&ext.to_ascii_lowercase()) {
@@ -2836,9 +3541,17 @@ impl QuartzForgeApp {
         }
     }
 
-    fn custom_code_window(&mut self, ctx: &egui::Context, kind: CustomCodeKind, title: &str) {
+    fn custom_code_window(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: egui::Id,
+        kind: CustomCodeKind,
+        title: &str,
+    ) {
         egui::Window::new(title)
+            .id(window_id)
             .resizable(true)
+            .collapsible(true)
             .default_size(egui::vec2(620.0, 420.0))
             .show(ctx, |ui| {
                 let project_root = self.project_root.clone();
@@ -2857,6 +3570,13 @@ impl QuartzForgeApp {
                             .collect()
                     })
                     .unwrap_or_default();
+
+                if (self.selected_custom_code_id.is_empty()
+                    || !rows.iter().any(|(id, _)| id == &self.selected_custom_code_id))
+                    && let Some((id, _)) = rows.first()
+                {
+                    self.selected_custom_code_id = id.clone();
+                }
 
                 ui.horizontal(|ui| {
                     if ui.button("+ Block").clicked() {
@@ -2899,6 +3619,24 @@ impl QuartzForgeApp {
                     }
                 });
 
+                if kind == CustomCodeKind::UpdateLoops && rows.is_empty() {
+                    ui.separator();
+                    ui.label("No dedicated update-loop custom blocks yet.");
+                    if ui.button("Populate From Imported Logic Trees").clicked() {
+                        let added = self.populate_update_loop_blocks_from_logic_trees();
+                        if added > 0 {
+                            self.status_line = format!(
+                                "Created {} update-loop custom block(s) from imported logic trees.",
+                                added
+                            );
+                            self.touch_and_refresh_preview();
+                        } else {
+                            self.status_line =
+                                "No logic trees found to populate update-loop blocks.".to_owned();
+                        }
+                    }
+                }
+
                 ui.separator();
                 for (id, label) in &rows {
                     if ui
@@ -2918,10 +3656,12 @@ impl QuartzForgeApp {
                 let mut helper_var_name = self.helper_var_name.clone();
                 let mut helper_var_value = self.helper_var_value.clone();
                 let mut helper_var_type = self.helper_var_type;
+                let editor_suggestions = self.current_editor_suggestions();
                 let mut ensure_terrain_guard = false;
                 let mut ensure_grapple_guard = false;
                 let mut ensure_save_game_guard = false;
                 let mut ensure_background_guard = false;
+                let mut picker_insert_snippet: Option<String> = None;
                 let selected_id = self.selected_custom_code_id.clone();
                 let Some(scene) = self
                     .project_state
@@ -2956,10 +3696,26 @@ impl QuartzForgeApp {
                     if matches!(kind, CustomCodeKind::GameStateVars | CustomCodeKind::TypedVars | CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents) {
                         ui.horizontal(|ui| {
                             ui.label("game_var");
-                            ui.text_edit_singleline(&mut helper_var_name);
+                            Self::suggestion_text_edit(
+                                ui,
+                                format!("helper_var_name_{title}"),
+                                &mut helper_var_name,
+                                &editor_suggestions.variable_names,
+                            );
                             ui.label("value");
-                            ui.text_edit_singleline(&mut helper_var_value);
+                            Self::suggestion_text_edit(
+                                ui,
+                                format!("helper_var_value_{title}"),
+                                &mut helper_var_value,
+                                &editor_suggestions.expression_names,
+                            );
                         });
+                        if !editor_suggestions.constant_names.is_empty() {
+                            ui.label(format!(
+                                "Known constants: {}",
+                                editor_suggestions.constant_names.join(", ")
+                            ));
+                        }
                         ui.horizontal(|ui| {
                             ui.label("type");
                             egui::ComboBox::from_id_salt(format!("helper_var_type_{title}"))
@@ -3121,9 +3877,16 @@ impl QuartzForgeApp {
                             ui.label("Terrain Collision Plugin");
                             for snippet in [
                                 "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.register_terrain(\n        \"ground\",\n        include_bytes!(\"../../assets/ground.rgba\"),\n        (64, 64),\n        (64.0, 64.0),\n        128,\n        4.0,\n    );\n}",
+                                "if let Some(outline) = TerrainCollisionPlugin::build_shared_outline(\n    include_bytes!(\"../../assets/ground.rgba\"),\n    (64, 64),\n    (64.0, 64.0),\n    128,\n    4.0,\n) {\n    if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n        plugin.register_shared_terrain(\"ground_shared\", outline.clone());\n        plugin.register_shared_terrain(\"ground_shared_2\", outline);\n    }\n}",
                                 "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.register_group_member(\n        \"floor\",\n        \"floor_tile_0\",\n        include_bytes!(\"../../assets/floor_tile.rgba\"),\n        (32, 32),\n        (32.0, 32.0),\n        128,\n        4.0,\n    );\n}",
+                                "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.clear_group(\"floor\");\n}",
                                 "canvas.run(Action::PluginCall {\n    name: \"terrain_collision\".to_owned(),\n    payload: std::sync::Arc::new(TerrainCollisionCall::EnsureDynamicOutlineForImage {\n        name: \"player\".to_owned(),\n        rgba_bytes: frame_rgba_bytes.clone(),\n        sprite_dims: (32, 48),\n        object_size: (32.0, 48.0),\n        threshold: 1,\n        rdp_epsilon: 2.0,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"terrain_collision\".to_owned(),\n    payload: std::sync::Arc::new(TerrainCollisionCall::PinCollisionImage {\n        name: \"player\".to_owned(),\n        image: player_mask_image.clone(),\n        object_size: (32.0, 48.0),\n        threshold: 1,\n        rdp_epsilon: 2.0,\n    }),\n});",
                                 "canvas.run(Action::PluginCall {\n    name: \"terrain_collision\".to_owned(),\n    payload: std::sync::Arc::new(TerrainCollisionCall::UnregisterDynamicOutline {\n        name: \"player\".to_owned(),\n    }),\n});",
+                                "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.register_dynamic_outline_from_image(\n        \"player\",\n        &player_mask_image,\n        (32.0, 48.0),\n        1,\n        2.0,\n    );\n}",
+                                "if let Some(plugin) = canvas.get_plugin_mut::<TerrainCollisionPlugin>() {\n    plugin.add_dynamic(\"moving_platform\");\n    let key = plugin.active_dynamic_outline_key(\"player\");\n    canvas.set_var(\"terrain_outline_key\", Value::String(format!(\"{:?}\", key)));\n}",
+                                "if let Some(plugin) = canvas.get_plugin::<TerrainCollisionPlugin>() {\n    if let Some(hulls) = plugin.dynamic_outline_world_hulls(\"player\", (player_x, player_y), player_rot) {\n        canvas.set_var(\"terrain_hull_count\", Value::I32(hulls.len() as i32));\n    }\n}",
+                                "if let Some(plugin) = canvas.get_plugin::<TerrainCollisionPlugin>() {\n    let overlaps = plugin.circle_overlaps_dynamic_outline(\n        \"player\",\n        (probe_x, probe_y),\n        12.0,\n        (player_x, player_y),\n        player_rot,\n    );\n    canvas.set_var(\"terrain_probe_overlap\", Value::Bool(matches!(overlaps, Some(true))));\n}",
                                 "canvas.run(Action::run_plugin(\"terrain_collision\", \"remove_group:floor\"));",
                                 "canvas.run(Action::run_plugin(\"terrain_collision\", \"rebuild:floor\"));",
                             ] {
@@ -3138,7 +3901,18 @@ impl QuartzForgeApp {
                             ui.label("Grapple Plugin");
                             for snippet in [
                                 "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::grappling_hook((anchor_x, anchor_y), 260.0),\n    }),\n});",
+                                "let tether = DistanceConstraint::new((anchor_x, anchor_y), 180.0)\n    .with_stiffness(0.9)\n    .with_damping(0.05);\nlet correction = tether.solve((player_x, player_y), (vel_x, vel_y));",
+                                "let spring = SpringConstraint::new((anchor_x, anchor_y), 180.0)\n    .with_spring_k(220.0)\n    .with_damp_k(14.0);\nlet impulse = spring.solve((player_x, player_y), (vel_x, vel_y));",
+                                "let correction = solve_distance_constraint(\n    (player_x, player_y),\n    (anchor_x, anchor_y),\n    180.0,\n    0.9,\n    0.05,\n    (vel_x, vel_y),\n);",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::at_point((anchor_x, anchor_y), 240.0),\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::to_object(\"hook_1\", 220.0),\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::web_swing((anchor_x, anchor_y), 260.0),\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::bungee((anchor_x, anchor_y), 180.0),\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Attach {\n        target: Target::name(\"player\"),\n        grapple: GrappleConstraint::wrecking_ball((anchor_x, anchor_y), 320.0),\n    }),\n});",
                                 "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetLength {\n        target: Target::name(\"player\"),\n        value: 220.0,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetStiffness {\n        target: Target::name(\"player\"),\n        value: 0.85,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetDamping {\n        target: Target::name(\"player\"),\n        value: 0.08,\n    }),\n});",
+                                "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetAnchor {\n        target: Target::name(\"player\"),\n        x: anchor_x,\n        y: anchor_y,\n    }),\n});",
                                 "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetAnchorObject {\n        target: Target::name(\"player\"),\n        anchor_object: \"hook_1\".to_owned(),\n    }),\n});",
                                 "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::SetSwingBias {\n        target: Target::name(\"player\"),\n        bias: SwingBias::Horizontal,\n    }),\n});",
                                 "canvas.run(Action::PluginCall {\n    name: \"grapple\".to_owned(),\n    payload: std::sync::Arc::new(GrappleCommand::Release {\n        target: Target::name(\"player\"),\n    }),\n});",
@@ -3154,7 +3928,13 @@ impl QuartzForgeApp {
                             ui.label("SaveGame Plugin");
                             for snippet in [
                                 "if !matches!(canvas.get_var(\"save_game_registered\"), Some(Value::Bool(true))) {\n    canvas.add_plugin(SaveGamePlugin::default());\n    canvas.set_var(\"save_game_registered\", Value::Bool(true));\n}",
-                                "canvas.run(Action::run_plugin(\"save_game\", \"save_slot:slot1\"));",
+                                "if let Some(save) = canvas.get_plugin_mut::<SaveGamePlugin>() {\n    save.track_object(\"player\");\n    save.track_objects([\"gem_1\", \"gem_2\"]);\n    save.autosave_interval_secs = 30.0;\n}",
+                                "if let Some(save) = canvas.get_plugin_mut::<SaveGamePlugin>() {\n    save.register_section(\"meta\", |cv| {\n        serde_json::json!({\n            \"score\": cv.get_i32(\"score\"),\n            \"coins\": cv.get_i32(\"coins\"),\n        })\n    });\n}",
+                                "canvas.run(Action::run_plugin(\"save_game\", \"save:slot1\"));",
+                                "canvas.run(Action::run_plugin(\"save_game\", \"load:slot1\"));",
+                                "canvas.run(Action::run_plugin(\"save_game\", \"delete:slot1\"));",
+                                "canvas.run(Action::run_plugin(\"save_game\", \"autosave_on\"));\ncanvas.run(Action::run_plugin(\"save_game\", \"autosave_off\"));",
+                                "let has_slot = Condition::Plugin {\n    name: \"save_game\".to_owned(),\n    arg: Some(\"slot_exists:slot1\".to_owned()),\n};\ncanvas.run(Action::when_if(has_slot, Action::custom(\"load_slot1\")));",
                             ] {
                                 if ui.button(snippet).clicked() {
                                     ensure_save_game_guard = true;
@@ -3166,8 +3946,11 @@ impl QuartzForgeApp {
                             ui.separator();
                             ui.label("Background Plugin");
                             for snippet in [
-                                "if !matches!(canvas.get_var(\"background_plugin_registered\"), Some(Value::Bool(true))) {\n    canvas.add_plugin(BackgroundPlugin::new());\n    canvas.set_var(\"background_plugin_registered\", Value::Bool(true));\n}",
-                                "canvas.run(Action::run_plugin(\"background\", \"show:main_bg\"));",
+                                "if !matches!(canvas.get_var(\"background_plugin_registered\"), Some(Value::Bool(true))) {\n    canvas.add_plugin(BackgroundPlugin::new(1280, 720));\n    canvas.set_var(\"background_plugin_registered\", Value::Bool(true));\n}",
+                                "if let Some(bg) = canvas.get_plugin_mut::<BackgroundPlugin>() {\n    let layered = LayeredBackground::new()\n        .with_layer(BackgroundLayer::GradientVertical {\n            top: (8, 26, 74),\n            bottom: (104, 194, 255),\n        })\n        .with_layer(BackgroundLayer::Starfield {\n            density: 240,\n            seed: 0xCAFE_BABE,\n            size_range: (1, 2),\n            brightness_range: (140, 255),\n            vertical_fade: Some(280),\n            scale: Some(0.9),\n        });\n    bg.set_background(\"main_bg\", layered, Some(\"cache/backgrounds\"));\n}",
+                                "if let Some(bg) = canvas.get_plugin_mut::<BackgroundPlugin>() {\n    let dusk = LayeredBackground::new()\n        .with_layer(BackgroundLayer::GradientFourCorner {\n            top_left: (24, 20, 60),\n            top_right: (88, 38, 102),\n            bottom_left: (255, 122, 66),\n            bottom_right: (255, 196, 122),\n        })\n        .with_layer(BackgroundLayer::Nebula {\n            color: (120, 70, 160),\n            density: 0.38,\n            seed: 0xFACE_B00C,\n        })\n        .with_tint((240, 230, 255))\n        .with_scale(0.95)\n        .flipped();\n    bg.set_background(\"dusk_bg\", dusk, None);\n}",
+                                "canvas.run(Action::run_plugin(\"background\", \"set:main_bg\"));",
+                                "canvas.run(Action::run_plugin(\"background\", \"transition:main_bg,night_bg,1.6\"));",
                             ] {
                                 if ui.button(snippet).clicked() {
                                     ensure_background_guard = true;
@@ -3177,7 +3960,7 @@ impl QuartzForgeApp {
                             }
 
                             ui.separator();
-                            let generic = "canvas.run(Action::run_plugin(\"save_game\", \"save_slot:slot1\"));";
+                            let generic = "canvas.run(Action::run_plugin(\"save_game\", \"save:slot1\"));";
                             if ui.button(generic).clicked() {
                                 ensure_save_game_guard = true;
                                 Self::append_code_block(&mut block.code, generic);
@@ -3192,6 +3975,7 @@ impl QuartzForgeApp {
                                 "let t = Target::name(\"player\");",
                                 "let l = Location::on_target(Target::name(\"player\"), Anchor::Center, (0.0, -24.0));",
                                 "let cond = Condition::VarExists(\"score\".to_owned()).and(Condition::KeyHeld(Key::Space));",
+                                "let names = canvas.object_names();\nlet _count = names.len();",
                                 "canvas.run(Action::when_if(cond, Action::custom(\"do_release\")));",
                             ] {
                                 if ui.button(snippet).clicked() {
@@ -3209,10 +3993,43 @@ impl QuartzForgeApp {
                                 "if let Some(name) = canvas.pool_acquire(\"bullet_pool\", (player_x, player_y)) {\n    // configure the pooled object if needed\n}",
                                 "canvas.pool_release(\"bullet_17\");\ncanvas.pool_release_all(\"bullet_pool\");",
                                 "let available = canvas.pool_available(\"bullet_pool\");\nlet active = canvas.pool_active(\"bullet_pool\");",
-                                "let cached = canvas.load_image_cached(\"assets/sprites/player.png\");",
-                                "let cached_sized = canvas.load_image_sized_cached(\"assets/sprites/tile.png\", 128.0, 128.0);",
-                                "let procedural = canvas.get_or_create_image(\"noise_bg\", || {\n    // build and return an Image here\n    canvas.load_image_cached(\"assets/sprites/fallback.png\")\n});",
+                                "let cached = canvas.load_image_cached(\"player_idle\", include_bytes!(\"../../assets/sprites/player.png\"));",
+                                "let cached_sized = canvas.load_image_sized_cached(\"tile_128\", include_bytes!(\"../../assets/sprites/tile.png\"), 128.0, 128.0);",
+                                "let procedural = canvas.get_or_create_image(\"noise_bg\", || {\n    // build and return an Image here\n    canvas.load_image_cached(\"fallback\", include_bytes!(\"../../assets/sprites/fallback.png\"))\n});",
                                 "canvas.clear_image_cache();",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                    ui.collapsing("9b) Timer & Schedules", |ui| {
+                        if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents | CustomCodeKind::TopLevel) {
+                            for snippet in [
+                                "let mut spawn_timer = Timer::new_looped(0.25);",
+                                "if spawn_timer.tick(1.0 / 60.0) {\n    canvas.run(Action::custom(\"spawn_tick\"));\n}",
+                                "let pct = spawn_timer.progress();\nlet left = spawn_timer.remaining();\nif spawn_timer.is_finished() { spawn_timer.reset(); }",
+                            ] {
+                                if ui.button(snippet).clicked() {
+                                    Self::append_code_block(&mut block.code, snippet);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                    ui.collapsing("9c) Sprite & Image Ops", |ui| {
+                        if matches!(kind, CustomCodeKind::UpdateLoops | CustomCodeKind::CustomEvents | CustomCodeKind::TopLevel) {
+                            for snippet in [
+                                "let sprite = load_image(include_bytes!(\"../../assets/sprites/player.png\"));",
+                                "let sprite_2x = load_image_sized(include_bytes!(\"../../assets/sprites/player.png\"), 128.0, 128.0);",
+                                "let anim = load_animation(include_bytes!(\"../../assets/sprites/run.gif\"), (48.0, 48.0), 12.0);",
+                                "let flipped = flip_horizontal(sprite.clone());\nlet mirrored = flip_vertical(sprite);",
+                                "let rotated = rotate_cw(sprite_2x.clone());\nlet turned = rotate_180(rotated);",
+                                "let base = load_image(include_bytes!(\"../../assets/sprites/player.png\"));\nlet tinted = with_tint(&base, Color(255, 220, 220, 255));\nif let Some(obj) = canvas.get_game_object_mut(\"player\") {\n    obj.set_image(tinted);\n}",
                             ] {
                                 if ui.button(snippet).clicked() {
                                     Self::append_code_block(&mut block.code, snippet);
@@ -3244,6 +4061,9 @@ impl QuartzForgeApp {
                                 "canvas.play_sound_with(\"assets/audio/coin.ogg\", SoundOptions::new().volume(0.25));",
                                 "canvas.run(Action::play_sound(\"assets/audio/whoosh.ogg\"));",
                                 "canvas.run(Action::play_sound_with_options(\"assets/audio/ambience.ogg\", SoundOptions::new().volume(0.18).looping(true)));",
+                                "let sfx = canvas.play_sound_with(\"assets/audio/beam.ogg\", SoundOptions::new().volume(0.35).pitch(1.15));\nsfx.pause();\nsfx.resume();",
+                                "let music = canvas.play_sound_with(\"assets/audio/loop.ogg\", SoundOptions::new().looping(true).volume(0.4).fade_in(1.0));\nmusic.fade_to(0.2, 0.8);\nmusic.fade_out(1.2);",
+                                "let handle = canvas.play_sound(\"assets/audio/chime.ogg\");\nhandle.set_volume(0.5);\nhandle.set_speed(0.95);\nlet _done = handle.is_finished();",
                             ] {
                                 if ui.button(snippet).clicked() {
                                     Self::append_code_block(&mut block.code, snippet);
@@ -3281,14 +4101,20 @@ impl QuartzForgeApp {
                     code_layouter(ui, text, wrap_width)
                 };
                 ui.label("Block Body (editable)");
-                changed |= ui
-                    .add(
-                        TextEdit::multiline(&mut block.code)
-                            .desired_rows(16)
-                            .code_editor()
-                            .layouter(&mut layouter),
-                    )
-                    .changed();
+                let body_response = ui.add(
+                    TextEdit::multiline(&mut block.code)
+                        .desired_rows(16)
+                        .code_editor()
+                        .layouter(&mut layouter),
+                );
+                changed |= body_response.changed();
+                if body_response.has_focus()
+                    && ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Space))
+                {
+                    self.suggestion_picker_open = true;
+                    self.suggestion_picker_target_block_id = block.id.clone();
+                    self.suggestion_picker_filter.clear();
+                }
 
                 ui.separator();
                 ui.label("Generated Code Preview (editable)");
@@ -3310,6 +4136,29 @@ impl QuartzForgeApp {
                 let _ = block;
                 let _ = scene;
 
+                if self.suggestion_picker_open
+                    && self.suggestion_picker_target_block_id == selected_id
+                {
+                    picker_insert_snippet =
+                        self.show_suggestion_picker_window(ctx, kind, &editor_suggestions);
+                }
+
+                if let Some(snippet) = picker_insert_snippet {
+                    if let Some(scene) = self
+                        .project_state
+                        .manifest
+                        .scenes
+                        .get_mut(self.project_state.active_scene_index)
+                        && let Some(block) = scene
+                            .custom_code_blocks
+                            .iter_mut()
+                            .find(|b| b.id == selected_id && b.kind == kind)
+                    {
+                        Self::append_code_block(&mut block.code, &snippet);
+                        changed = true;
+                    }
+                }
+
                 if ensure_terrain_guard {
                     self.ensure_plugin_imports_guard(
                         "terrain_collision",
@@ -3319,7 +4168,7 @@ impl QuartzForgeApp {
                 if ensure_grapple_guard {
                     self.ensure_plugin_imports_guard(
                         "grapple",
-                        &["use quartz::plugin::grapple::{GrappleCommand, GrappleConstraint, SwingBias};"],
+                        &["use quartz::plugin::grapple::{DistanceConstraint, GrappleCommand, GrappleConstraint, SpringConstraint, SwingBias, solve_distance_constraint};"],
                     );
                 }
                 if ensure_save_game_guard {
@@ -3331,7 +4180,7 @@ impl QuartzForgeApp {
                 if ensure_background_guard {
                     self.ensure_plugin_imports_guard(
                         "background",
-                        &["use quartz::plugin::background::BackgroundPlugin;"],
+                        &["use quartz::plugin::background::{BackgroundLayer, BackgroundPlugin, LayeredBackground};"],
                     );
                 }
 
@@ -3343,6 +4192,252 @@ impl QuartzForgeApp {
                     self.touch_and_refresh_preview();
                 }
             });
+    }
+
+    fn custom_code_other_window(&mut self, ctx: &egui::Context, window_id: egui::Id, title: &str) {
+        egui::Window::new(title)
+            .id(window_id)
+            .resizable(true)
+            .collapsible(true)
+            .default_size(egui::vec2(700.0, 460.0))
+            .show(ctx, |ui| {
+                let project_root = self.project_root.clone();
+
+                let rows: Vec<(String, String)> = self
+                    .project_state
+                    .manifest
+                    .scenes
+                    .get(self.project_state.active_scene_index)
+                    .map(|scene| {
+                        scene
+                            .custom_code_blocks
+                            .iter()
+                            .filter(|b| Self::is_other_custom_kind(b.kind))
+                            .map(|b| {
+                                (
+                                    b.id.clone(),
+                                    format!(
+                                        "{} [{}] ({})",
+                                        b.name,
+                                        b.kind.as_str(),
+                                        b.output_file
+                                    ),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if (self.selected_custom_code_id.is_empty()
+                    || !rows.iter().any(|(id, _)| id == &self.selected_custom_code_id))
+                    && let Some((id, _)) = rows.first()
+                {
+                    self.selected_custom_code_id = id.clone();
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("+ Block").clicked() {
+                        self.project_state
+                            .add_custom_code_block_to_active_scene(CustomCodeKind::TopLevel);
+                        if let Some(scene) = self
+                            .project_state
+                            .manifest
+                            .scenes
+                            .get(self.project_state.active_scene_index)
+                        {
+                            if let Some(last) = scene
+                                .custom_code_blocks
+                                .iter()
+                                .rev()
+                                .find(|b| b.kind == CustomCodeKind::TopLevel)
+                            {
+                                self.selected_custom_code_id = last.id.clone();
+                            }
+                        }
+                        self.touch_and_refresh_preview();
+                    }
+                    if ui.button("- Block").clicked() {
+                        let selected_id = self.selected_custom_code_id.clone();
+                        if let Some(scene) = self
+                            .project_state
+                            .manifest
+                            .scenes
+                            .get_mut(self.project_state.active_scene_index)
+                        {
+                            if let Some(idx) = scene
+                                .custom_code_blocks
+                                .iter()
+                                .position(|b| Self::is_other_custom_kind(b.kind) && b.id == selected_id)
+                            {
+                                scene.custom_code_blocks.remove(idx);
+                                self.selected_custom_code_id.clear();
+                                self.touch_and_refresh_preview();
+                            }
+                        }
+                    }
+                });
+
+                ui.separator();
+                for (id, label) in &rows {
+                    if ui
+                        .selectable_label(*id == self.selected_custom_code_id, label)
+                        .clicked()
+                    {
+                        self.selected_custom_code_id = id.clone();
+                    }
+                }
+
+                if self.selected_custom_code_id.is_empty() {
+                    ui.separator();
+                    ui.label("No other custom code blocks found.");
+                    return;
+                }
+
+                ui.separator();
+                let selected_id = self.selected_custom_code_id.clone();
+                let mut changed = false;
+                let editor_suggestions = self.current_editor_suggestions();
+                let mut picker_insert_snippet: Option<String> = None;
+
+                let Some(scene) = self
+                    .project_state
+                    .manifest
+                    .scenes
+                    .get_mut(self.project_state.active_scene_index)
+                else {
+                    return;
+                };
+                let Some(block) = scene
+                    .custom_code_blocks
+                    .iter_mut()
+                    .find(|b| b.id == selected_id && Self::is_other_custom_kind(b.kind))
+                else {
+                    return;
+                };
+
+                ui.label(format!("Kind: {}", block.kind.as_str()));
+                if block.kind == CustomCodeKind::ManualFileOverride {
+                    ui.label("ManualFileOverride: user-owned Rust preserved across regeneration.");
+                }
+                changed |= ui.text_edit_singleline(&mut block.name).changed();
+                changed |= Self::source_file_picker(
+                    ui,
+                    "File Target",
+                    project_root.as_deref(),
+                    &mut self.status_line,
+                    &mut block.output_file,
+                );
+
+                let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+                    code_layouter(ui, text, wrap_width)
+                };
+                let body_response = ui.add(
+                    TextEdit::multiline(&mut block.code)
+                        .desired_rows(20)
+                        .code_editor()
+                        .layouter(&mut layouter),
+                );
+                changed |= body_response.changed();
+                if body_response.has_focus()
+                    && ui.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Space))
+                {
+                    self.suggestion_picker_open = true;
+                    self.suggestion_picker_target_block_id = block.id.clone();
+                    self.suggestion_picker_filter.clear();
+                }
+
+                let _ = block;
+                let _ = scene;
+
+                if self.suggestion_picker_open
+                    && self.suggestion_picker_target_block_id == selected_id
+                {
+                    picker_insert_snippet = self.show_suggestion_picker_window(
+                        ctx,
+                        CustomCodeKind::TopLevel,
+                        &editor_suggestions,
+                    );
+                }
+
+                if let Some(snippet) = picker_insert_snippet {
+                    if let Some(scene) = self
+                        .project_state
+                        .manifest
+                        .scenes
+                        .get_mut(self.project_state.active_scene_index)
+                        && let Some(block) = scene
+                            .custom_code_blocks
+                            .iter_mut()
+                            .find(|b| b.id == selected_id && Self::is_other_custom_kind(b.kind))
+                    {
+                        Self::append_code_block(&mut block.code, &snippet);
+                        changed = true;
+                    }
+                }
+
+                if changed {
+                    self.touch_and_refresh_preview();
+                }
+            });
+    }
+
+    fn is_other_custom_kind(kind: CustomCodeKind) -> bool {
+        !matches!(
+            kind,
+            CustomCodeKind::Constants
+                | CustomCodeKind::GameStateVars
+                | CustomCodeKind::TypedVars
+                | CustomCodeKind::CustomEvents
+                | CustomCodeKind::UpdateLoops
+        )
+    }
+
+    fn populate_update_loop_blocks_from_logic_trees(&mut self) -> usize {
+        let Some(scene) = self
+            .project_state
+            .manifest
+            .scenes
+            .get_mut(self.project_state.active_scene_index)
+        else {
+            return 0;
+        };
+
+        if scene.logic_trees.is_empty() {
+            return 0;
+        }
+
+        scene
+            .custom_code_blocks
+            .retain(|b| !(b.kind == CustomCodeKind::UpdateLoops && b.id.starts_with("logic_tree_")));
+
+        let default_output = scene.source_file.clone();
+        let mut added = 0usize;
+        for tree in &scene.logic_trees {
+            let mut block = crate::core::quartz_domain::CustomCodeBlock::new(
+                format!("logic_tree_{}", tree.id),
+                tree.name.clone(),
+                CustomCodeKind::UpdateLoops,
+                if tree.output_file.trim().is_empty() {
+                    default_output.clone()
+                } else {
+                    tree.output_file.clone()
+                },
+            );
+            block.code = codegen::emit_action_lines(&tree.nodes, "").join("\n");
+            scene.custom_code_blocks.push(block);
+            added += 1;
+        }
+
+        if let Some(last) = scene
+            .custom_code_blocks
+            .iter()
+            .rev()
+            .find(|b| b.kind == CustomCodeKind::UpdateLoops)
+        {
+            self.selected_custom_code_id = last.id.clone();
+        }
+        self.project_state.dirty = true;
+        added
     }
 
     fn grapple_wizard_window(&mut self, ctx: &egui::Context) {
@@ -3893,6 +4988,9 @@ impl QuartzForgeApp {
                 .add(Slider::new(&mut object.advanced.rotation_deg, -360.0..=360.0).text("rotation"))
                 .changed();
             changed |= ui
+                .add(Slider::new(&mut object.advanced.rotation_resistance, 0.0..=1.0).text("rotation resistance"))
+                .changed();
+            changed |= ui
                 .add(Slider::new(&mut object.advanced.pivot_x, 0.0..=1.0).text("pivot x"))
                 .changed();
             changed |= ui
@@ -3921,16 +5019,127 @@ impl QuartzForgeApp {
             if !custom_material {
                 ui.label("Preset materials export to Quartz as PhysicsMaterial::preset().");
             }
+
+            ui.separator();
+            ui.label("Visual Effects");
+            changed |= ui.checkbox(&mut object.advanced.tint_enabled, "tint").changed();
+            if object.advanced.tint_enabled {
+                let mut tint = Color32::from_rgba_unmultiplied(
+                    object.advanced.tint_rgba[0],
+                    object.advanced.tint_rgba[1],
+                    object.advanced.tint_rgba[2],
+                    object.advanced.tint_rgba[3],
+                );
+                if ui.color_edit_button_srgba(&mut tint).changed() {
+                    object.advanced.tint_rgba = [tint.r(), tint.g(), tint.b(), tint.a()];
+                    changed = true;
+                }
+            }
+
+            changed |= ui.checkbox(&mut object.advanced.glow_enabled, "glow").changed();
+            if object.advanced.glow_enabled {
+                let mut glow = Color32::from_rgba_unmultiplied(
+                    object.advanced.glow_rgba[0],
+                    object.advanced.glow_rgba[1],
+                    object.advanced.glow_rgba[2],
+                    object.advanced.glow_rgba[3],
+                );
+                if ui.color_edit_button_srgba(&mut glow).changed() {
+                    object.advanced.glow_rgba = [glow.r(), glow.g(), glow.b(), glow.a()];
+                    changed = true;
+                }
+                changed |= ui
+                    .add(Slider::new(&mut object.advanced.glow_width, 0.0..=64.0).text("glow width"))
+                    .changed();
+            }
         }
 
         if object.visible.collision {
             ui.label("Collision");
+            changed |= collision_mask_editor(ui, "collision layer (exists on)", &mut object.advanced.collision_layer);
+            changed |= collision_mask_editor(ui, "collision mask (interacts with)", &mut object.advanced.collision_mask);
+
+            let mut collision_mode = object.advanced.collision_mode;
+            egui::ComboBox::from_label("collision mode")
+                .selected_text(collision_mode.as_str())
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut collision_mode, QuartzObjectCollisionMode::Auto, "Auto")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut collision_mode,
+                            QuartzObjectCollisionMode::NonPlatform,
+                            "NonPlatform",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut collision_mode, QuartzObjectCollisionMode::Surface, "Surface")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut collision_mode,
+                            QuartzObjectCollisionMode::SolidRectangle,
+                            "SolidRectangle",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut collision_mode,
+                            QuartzObjectCollisionMode::SolidCircle,
+                            "SolidCircle",
+                        )
+                        .changed();
+                });
+            if collision_mode != object.advanced.collision_mode {
+                object.advanced.collision_mode = collision_mode;
+                match collision_mode {
+                    QuartzObjectCollisionMode::NonPlatform => object.advanced.is_platform = false,
+                    QuartzObjectCollisionMode::Surface
+                    | QuartzObjectCollisionMode::SolidRectangle
+                    | QuartzObjectCollisionMode::SolidCircle => object.advanced.is_platform = true,
+                    QuartzObjectCollisionMode::Auto => {}
+                }
+                changed = true;
+            }
+            if object.advanced.collision_mode == QuartzObjectCollisionMode::SolidCircle {
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.collision_circle_radius, 0.0..=4000.0)
+                            .text("solid circle radius"),
+                    )
+                    .changed();
+            }
+
             changed |= ui
-                .add(Slider::new(&mut object.advanced.collision_layer, 0..=64).text("collision layer"))
+                .checkbox(&mut object.advanced.is_platform, "treat as platform/static body (is_platform)")
                 .changed();
-            changed |= ui
-                .add(Slider::new(&mut object.advanced.collision_mask, 0..=64).text("collision mask"))
-                .changed();
+            changed |= ui.checkbox(&mut object.advanced.clip_enabled, "clip drawable output").changed();
+            if object.advanced.clip_enabled {
+                changed |= ui
+                    .checkbox(&mut object.advanced.clip_origin_enabled, "override clip origin")
+                    .changed();
+                if object.advanced.clip_origin_enabled {
+                    changed |= ui
+                        .add(Slider::new(&mut object.advanced.clip_origin_x, -2000.0..=2000.0).text("clip origin x"))
+                        .changed();
+                    changed |= ui
+                        .add(Slider::new(&mut object.advanced.clip_origin_y, -2000.0..=2000.0).text("clip origin y"))
+                        .changed();
+                }
+
+                changed |= ui
+                    .checkbox(&mut object.advanced.clip_size_enabled, "override clip size")
+                    .changed();
+                if object.advanced.clip_size_enabled {
+                    changed |= ui
+                        .add(Slider::new(&mut object.advanced.clip_size_w, 0.0..=4000.0).text("clip size w"))
+                        .changed();
+                    changed |= ui
+                        .add(Slider::new(&mut object.advanced.clip_size_h, 0.0..=4000.0).text("clip size h"))
+                        .changed();
+                }
+            }
         }
 
         if object.visible.slope {
@@ -4037,18 +5246,68 @@ impl QuartzForgeApp {
                 changed |= ui
                     .add(Slider::new(&mut object.advanced.auto_align_speed, 0.0..=64.0).text("auto align speed"))
                     .changed();
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.auto_align_threshold, 0.0..=1.0)
+                            .text("auto align threshold"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.auto_align_min_depth, 0.0..=1.0)
+                            .text("auto align min depth"),
+                    )
+                    .changed();
             }
         }
 
         if object.visible.camera_space {
             ui.label("Camera-space / HUD");
-            if object.advanced.is_camera_space_pinned() {
+            changed |= ui
+                .checkbox(&mut object.advanced.screen_pin_enabled, "pin to screen anchor")
+                .changed();
+            if object.advanced.screen_pin_enabled {
+                object.advanced.screen_space = false;
+                object.advanced.ignore_zoom = true;
                 ui.label("Pinned objects follow screen space and ignore camera zoom.");
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.screen_pin_anchor_x, 0.0..=1.0)
+                            .text("pin anchor x"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.screen_pin_anchor_y, 0.0..=1.0)
+                            .text("pin anchor y"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.screen_pin_offset_x, -4000.0..=4000.0)
+                            .text("pin offset x"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        Slider::new(&mut object.advanced.screen_pin_offset_y, -4000.0..=4000.0)
+                            .text("pin offset y"),
+                    )
+                    .changed();
             } else {
                 changed |= ui
-                    .checkbox(&mut object.advanced.ignore_zoom, "ignore zoom (still world-space)")
+                    .checkbox(&mut object.advanced.screen_space, "screen space (unanchored)")
                     .changed();
+                if object.advanced.screen_space {
+                    object.advanced.ignore_zoom = true;
+                    ui.label("Screen-space objects ignore camera zoom.");
+                } else {
+                    changed |= ui
+                        .checkbox(&mut object.advanced.ignore_zoom, "ignore zoom (still world-space)")
+                        .changed();
+                }
             }
+
         }
 
         if changed {
@@ -4287,6 +5546,106 @@ impl QuartzForgeApp {
         result
     }
 
+    fn pre_generate_roundtrip_check(&mut self) {
+        let Some(_root) = self.project_root.clone() else {
+            self.status_line = "Open a project before running roundtrip pre-check.".to_owned();
+            return;
+        };
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("qf_roundtrip_precheck_{unique}"));
+
+        let run_result: Result<String> = (|| {
+            std::fs::create_dir_all(&temp_root)
+                .with_context(|| format!("failed to create temp root {}", temp_root.display()))?;
+
+            persistence::ensure_runtime_scaffold(&self.project_state, &temp_root)?;
+            project_sync::write_all_generated_files_from_state(&self.project_state, &temp_root)?;
+
+            let mut reimported = self.project_state.clone();
+            let files = Self::collect_rs_files(&temp_root);
+            let report = project_import::import_files_into_state(&mut reimported, &temp_root, &files, true)?;
+
+            let before_scene = self.project_state.manifest.scenes[self.project_state.active_scene_index].clone();
+            let after_scene = reimported.manifest.scenes[self.project_state.active_scene_index].clone();
+
+            let before_layout: Vec<String> = before_scene
+                .custom_code_blocks
+                .iter()
+                .map(|b| format!("{}|{}|{}", b.kind.as_str(), b.id, b.output_file))
+                .collect();
+            let after_layout: Vec<String> = after_scene
+                .custom_code_blocks
+                .iter()
+                .map(|b| format!("{}|{}|{}", b.kind.as_str(), b.id, b.output_file))
+                .collect();
+
+            let mut moved = Vec::new();
+            for before in &before_scene.custom_code_blocks {
+                if let Some(after) = after_scene.custom_code_blocks.iter().find(|b| b.id == before.id)
+                    && (after.kind != before.kind || after.output_file != before.output_file)
+                {
+                    moved.push(format!(
+                        "{}: {}:{} -> {}:{}",
+                        before.id,
+                        before.kind.as_str(),
+                        before.output_file,
+                        after.kind.as_str(),
+                        after.output_file
+                    ));
+                }
+            }
+
+            let added = after_layout
+                .iter()
+                .filter(|entry| !before_layout.contains(*entry))
+                .count();
+            let removed = before_layout
+                .iter()
+                .filter(|entry| !after_layout.contains(*entry))
+                .count();
+            let update_loop_blocks = after_scene
+                .custom_code_blocks
+                .iter()
+                .filter(|b| b.kind == CustomCodeKind::UpdateLoops)
+                .count();
+
+            let mut summary = format!(
+                "Roundtrip pre-check: files={}, imported(objects={}, events={}, logic_trees={}, custom_blocks={}), update_loops_blocks={}, moved={}, added={}, removed={}",
+                files.len(),
+                report.imported_object_count,
+                report.imported_event_count,
+                report.imported_logic_tree_count,
+                report.imported_custom_block_count,
+                update_loop_blocks,
+                moved.len(),
+                added,
+                removed
+            );
+
+            if !moved.is_empty() {
+                let preview = moved.iter().take(3).cloned().collect::<Vec<_>>().join(" | ");
+                summary.push_str(&format!("; moved_preview={preview}"));
+            }
+
+            Ok(summary)
+        })();
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+
+        match run_result {
+            Ok(summary) => {
+                self.status_line = summary;
+            }
+            Err(err) => {
+                self.status_line = format!("Roundtrip pre-check failed: {err}");
+            }
+        }
+    }
+
     fn write_all_generated_files_from_project_state(&mut self) {
         let Some(root) = self.project_root.clone() else {
             self.status_line = "Open a project before writing generated script.".to_owned();
@@ -4352,7 +5711,7 @@ impl QuartzForgeApp {
                     Ok(()) => {
                         self.project_sync_report = None;
                         self.show_project_sync_prompt = false;
-                        self.status_line = "Restored project save state from the last exported Quartz Forge file snapshot.".to_owned();
+                        self.status_line = "Restored project save state from the last sync snapshot.".to_owned();
                     }
                     Err(err) => {
                         self.status_line = format!("Restored snapshot state in memory, but saving failed: {err}");
@@ -4443,6 +5802,11 @@ impl QuartzForgeApp {
 
         match project_import::import_files_into_state(&mut self.project_state, &root, rel_paths, true) {
             Ok(report) => {
+                if !report.has_project_state_changes() {
+                    self.status_line = "Semantic import found no project-state changes; save data and sync snapshot were left unchanged.".to_owned();
+                    return;
+                }
+
                 if let Err(err) = persistence::save_project(&mut self.project_state, &root) {
                     self.status_line = format!("Semantic import succeeded in memory, but saving project failed: {err}");
                     return;
@@ -4498,6 +5862,27 @@ impl QuartzForgeApp {
                 self.status_line = format!("Semantic import failed: {err}");
             }
         }
+    }
+
+    fn manual_semantic_reimport(&mut self) {
+        let Some(root) = self.project_root.clone() else {
+            self.status_line = "Open a project before running semantic import.".to_owned();
+            return;
+        };
+
+        let mut files = Self::collect_rs_files(&root);
+        let manifest_files = self.collect_manifest_referenced_rs_files(&root);
+        files.extend(manifest_files);
+        files.sort();
+        files.dedup();
+
+        if files.is_empty() {
+            self.status_line = "No Rust source files found for semantic import (scan + manifest references).".to_owned();
+            return;
+        }
+
+        self.status_line = format!("Semantic reimport scanning {} Rust file(s)...", files.len());
+        self.import_files_semantically(&files);
     }
 
     fn background_cell_size(canvas: &SceneCanvasSpec) -> (f32, f32) {
@@ -4654,7 +6039,7 @@ impl eframe::App for QuartzForgeApp {
                     .show(ctx, |ui| {
                         ui.label(&report.summary);
                         if let Some(generated_at) = &report.snapshot_generated_at_utc {
-                            ui.label(format!("Last exported sync snapshot: {generated_at}"));
+                            ui.label(format!("Last sync snapshot time: {generated_at}"));
                         }
                         ui.separator();
                         if !report.modified_files.is_empty() {
@@ -4688,17 +6073,17 @@ impl eframe::App for QuartzForgeApp {
                             .collect::<Vec<_>>();
                         ui.horizontal_wrapped(|ui| {
                             if report.can_restore_project_from_last_export
-                                && ui.button("Update Project Save State To Match Last Exported Files").clicked()
+                                && ui.button("Restore Project Save State To Last Sync Snapshot").clicked()
                             {
                                 self.restore_project_state_from_last_export();
                             }
                             if report.can_rewrite_files_from_project
-                                && ui.button("Update Files To Match Project Save State").clicked()
+                                && ui.button("Rewrite Files From Current Project Save State").clicked()
                             {
                                 self.write_all_generated_files_from_project_state();
                             }
                             if !importable_files.is_empty()
-                                && ui.button("Semantic Import Changed Files").clicked()
+                                && ui.button("Import Changed Files Into Project Save State (Use This If Imports Are Newer)").clicked()
                             {
                                 self.import_files_semantically(&importable_files);
                             }
