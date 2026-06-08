@@ -774,7 +774,10 @@ fn codegen_api_guidance() -> Value {
                 "Use canvas.on_update(|canvas| { canvas.run(Action::...) ... }) for update loop entities.",
                 "Use canvas.register_custom_event(name, |canvas| {...}) for custom-event entities.",
                 "Define GameObject::build chains directly in setup_scene or spawn_* helpers so object importer can recover object blueprints.",
-                "Keep scalar game state in canvas.set_var/get_var with Action::SetVar/ModVar for importer-visible game vars."
+                "Keep scalar game state in canvas.set_var/get_var with Action::SetVar/ModVar for importer-visible game vars.",
+                "For setup_scene generation, use three phases: build local objects first, emit setup_runtime/game_state blocks while locals are alive, then call canvas.add_game_object for each local.",
+                "Never emit local-object mutations after add_game_object has moved the local; this causes E0382 borrow-of-moved errors in generated Rust.",
+                "Preserve setup_runtime statements that target builder locals by rewriting local variable names to object ids token-aware (identifier boundaries), not substring matching."
             ]
         },
         "dispatch_priority_order": [
@@ -820,7 +823,9 @@ fn codegen_api_guidance() -> Value {
             "Direct plugin method calls in on_update — use Action::PluginCall",
             "Action::SetPosition for movement — zeroes momentum; use Action::ApplyMomentum, Action::SetMomentum, or Action::Teleport",
             "collision_layer(0) — silently disables collision; use named non-zero layer constants",
-            "Entropy::range(int, int) — must be f32: Entropy::range(0.0, 10.0)"
+            "Entropy::range(int, int) — must be f32: Entropy::range(0.0, 10.0)",
+            "Emit setup_runtime local mutations after add_game_object moves object locals — causes E0382 borrow/assign-after-move compile failures",
+            "Detect unresolved local references using substring checks (for example overlay in game_over_overlay) — causes false drops of valid setup_runtime statements"
         ],
         "quick_patterns": {
             "score_increment": "Action::ModVar { name: 'score'.into(), op: MathOp::Add, operand: Expr::i32(1) }",
@@ -862,7 +867,10 @@ fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
             "AI codegen should mirror quartz_forge GUI export shape (setup_scene/register_logic/register_events + component routing) for reliable semantic import.",
             "For static images, prefer canvas.load_image_cached/load_image_sized_cached over repeated quartz::sprite::load_image calls when reuse is expected.",
             "Use custom code blocks or ManualFileOverride for user-owned Rust sections that must survive regeneration.",
-            "Keep generated scene/component module paths relative to the scene source file layout, not hard-coded to the project root."
+            "Keep generated scene/component module paths relative to the scene source file layout, not hard-coded to the project root.",
+            "When exporting setup_scene, generate in three phases: build object locals -> emit setup_runtime/game_state -> move locals into canvas with add_game_object.",
+            "Treat no_collision objects as collision_layer(0) + collision_mask(0) + non_platform so HUD/overlay/background objects do not become accidental colliders.",
+            "setup_runtime preservation must rewrite builder-local references token-aware to object ids; do not use naive substring matching."
         ],
         "ai_generation_rules": {
             "api_first_mandate": "Exhaust native Quartz API before writing custom Rust. This is a HARD RULE — treat violations as blocking.",
@@ -880,7 +888,9 @@ fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
                 "if/match in on_update to dispatch what GameEvent variants can handle — use canvas.add_event",
                 "if canvas.get_bool(...) to branch what Action::Conditional can handle — use Action::Conditional",
                 "Direct plugin method calls in on_update — use Action::PluginCall dispatch",
-                "Action::SetPosition for movement — zeroes momentum; use Teleport or ApplyMomentum/SetMomentum"
+                "Action::SetPosition for movement — zeroes momentum; use Teleport or ApplyMomentum/SetMomentum",
+                "Mutating local object variables after add_game_object has moved them into canvas",
+                "Dropping valid setup_runtime statements because local-name detection is substring-based instead of identifier-boundary-based"
             ]
         },
         "editor_surfaces_agents_should_respect": {

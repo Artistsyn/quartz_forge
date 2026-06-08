@@ -35,6 +35,24 @@ Quartz Forge MCP is not just a passive lookup layer. Its purpose is to let Copil
 - Use quartz_forge MCP as an authoring assistant for project generation, not just as a syntax search endpoint.
 - Keep tool names short, explicit, and policy-bearing so model routing is unambiguous.
 
+## Adequacy For AI Project Coding
+
+Quartz Forge MCP is currently adequate for guided AI-assisted project coding when used with a strict workflow:
+
+1. Call `qf_codegen_api_guidance` before gameplay/event logic generation.
+2. Validate non-trivial snippets with `qf_api_verify_snippet`.
+3. Use `qf_project_state_dump` and `qf_project_apply_state` for project-state changes.
+4. Use `qf_project_import_semantic` with fallback enabled during active importer hardening.
+5. Run `qf_project_sync_status` after generation/import cycles and stop on unexpected drift.
+6. Use `qf_forge_check_parity` before assuming unsupported Action/Condition coverage is available.
+
+### Nuances discovered during import/export hardening
+
+- setup_scene generation must keep local object mutations before object moves into canvas.
+- setup_runtime preservation must rewrite builder-local references token-aware, not by substring.
+- no-collision object semantics must preserve zero layer/mask to avoid accidental colliders.
+- Organizational diffs can be behavior-preserving; compile/runtime validation is still required.
+
 ## Current Server Commands
 
 - `quartz_forge_mcp --stdio`

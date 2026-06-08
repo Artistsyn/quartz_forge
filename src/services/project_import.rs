@@ -4650,13 +4650,6 @@ pub fn setup_scene(canvas: &mut Canvas) {
             .find(|obj| obj.id == "player")
             .expect("player object should import");
         assert_eq!(player.color_rgb, [84, 210, 255]);
-        if let Some(block) = state.manifest.scenes[0]
-            .custom_code_blocks
-            .iter()
-            .find(|b| b.kind == CustomCodeKind::TypedVars && b.id == "setup_runtime")
-        {
-            println!("SETUP_RUNTIME_BLOCK:\n{}", block.code);
-        }
         assert!(state.manifest.scenes[0]
             .custom_code_blocks
             .iter()

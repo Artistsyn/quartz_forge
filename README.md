@@ -1,168 +1,190 @@
 # Quartz Forge
 
-Quartz Forge is a Quartz-native authoring environment inside the FlowMake workspace. Its job is to help humans and AI agents build real Quartz 2D game projects through source-backed scene editing, Quartz-native code generation, local API verification, and MCP-assisted workflows.
+Quartz Forge is a Quartz-native game authoring environment for the FlowMake workspace. It combines scene editing, structured manifest state, Rust code generation, and an MCP server so both humans and AI agents can build Quartz projects with source-backed constraints.
 
-## What Quartz Forge Is For
+## Quick Links
 
-Quartz Forge is meant to keep editor intent and runtime code close together.
+- User manual: [USER_MANUAL.md](USER_MANUAL.md)
+- Operator checklist: [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.md)
+- API coverage checklist: [QUARTZ_API_COVERAGE_CHECKLIST.md](QUARTZ_API_COVERAGE_CHECKLIST.md)
+- MCP tool catalog: [QUARTZ_FORGE_MCP_TOOL_CATALOG.md](QUARTZ_FORGE_MCP_TOOL_CATALOG.md)
+- MCP implementation plan: [QUARTZ_FORGE_MCP_SERVER_IMPLEMENTATION_PLAN.md](QUARTZ_FORGE_MCP_SERVER_IMPLEMENTATION_PLAN.md)
 
-| Goal | What it means |
-| --- | --- |
-| Quartz-native authoring | Generated output stays aligned with `quartz::prelude::*`, Quartz `Action` and `Condition` semantics, and local engine reality. |
-| AI-assisted project building | Copilot and other agents should be able to use quartz_forge and its MCP tools to generate, extend, and maintain new Quartz game projects without inventing off-model engine syntax. |
-| Editor-to-runtime continuity | Scene layout, object settings, actions, events, custom code blocks, and generated files all point toward shippable Rust output. |
-| Workspace-aware validation | Quartz Forge validates against local Quartz source, local api.txt, and quartz_forge's own coverage so agents can route work through real supported surfaces. |
+## Current Stage (Read First)
 
-## Core Capabilities
+Quartz Forge is actively evolving. It is usable and productive, but still under heavy import/export hardening and API parity expansion.
 
-### Visual Scene Authoring
+What this means in practice:
 
-- Interactive scene canvas with drag, resize, rotate, pan, zoom, grid snap, arrow-key nudging, and layer-ordered rendering.
-- Object authoring for rectangles, circles, spawn-only templates, background objects, static images, and animated sprites.
-- Camera-space pinning, pivot visualization, background-cell overlays, camera frame overlays, and spawn ghost overlays.
-- Rotated asset previews now follow the object's rotation parameter in the editor, matching expected Quartz runtime behavior.
+- You should assume import and file-generation edge cases still exist.
+- Roundtrip behavior is improving quickly, but not all source shapes are semantically imported with full fidelity yet.
+- API coverage is broad, but not complete for every Action/Condition/editor workflow.
+- Manual verification after major import/export cycles is still recommended.
+- We are explicitly collecting user feedback to drive stabilization toward release-readiness, but we are not release-ready yet.
 
-### Logic, Events, and Code Generation
+## What Quartz Forge Does
 
-- Update-script authoring that exports Quartz-native `canvas.on_update(...)` logic.
-- Event builder aligned with Quartz event shapes such as key, mouse, collision, tick, and custom event flows.
-- Action editing for movement, camera effects, plugin calls, grouped actions, conditional actions, variable ops, spawn actions, and text updates.
-- Generated Quartz syntax preview plus one-click script write to generated Rust files.
+- Visual authoring for scenes and objects (position, size, rotation, layers, collision and advanced params).
+- Logic/event authoring that maps to Quartz-native runtime code.
+- Structured project state with generated Rust output.
+- Multi-file generation support with module wiring for supported component targets.
+- MCP tools for API lookup, snippet verification, parity checks, project state operations, and roundtrip diagnostics.
 
-### Multi-File Project Support
+## Workspace Requirements
 
-- Scene parts can target external files instead of a single monolithic scene source.
-- Quartz Forge already auto-emits `#[path = "..."] mod ...;` and `use module::*;` lines for generated scene composition when objects, events, logic trees, or custom code blocks live in separate target files.
-- This keeps generated Rust syntactically valid without asking users or agents to hand-wire basic module imports for supported quartz_forge output paths.
-
-### MCP and Agent Workflows
-
-- Dedicated `quartz_forge_mcp` server for local API lookup, snippet verification, parity checks, spawn audits, text guidance, and layout verification.
-- Intended to let Copilot or other agents interface with quartz_forge itself when creating or extending Quartz projects.
-- The MCP layer is meant to keep agent output Quartz-native, source-backed, and workspace-aware.
-
-## MCP Purpose
-
-Quartz Forge MCP is not only a syntax search endpoint.
-
-Its purpose is to help agents:
-
-- look up real Quartz API forms before generating code,
-- verify that proposed snippets match local Quartz and quartz_forge support,
-- understand text, spawn, and layout rules that quartz_forge already knows,
-- generate new project code using Quartz-native syntax instead of ad-hoc wrappers.
-
-### Current MCP tools
-
-| Tool | Purpose |
-| --- | --- |
-| `qf_api_lookup` | Search local Quartz API/source for exact native symbols and signatures. |
-| `qf_api_verify_snippet` | Validate snippets and warn about API drift or risky text patterns. |
-| `qf_text_knowledge` | Return Quartz Forge's preferred text construction and font-caching guidance. |
-| `qf_forge_check_parity` | Compare Quartz Forge support against Quartz action and condition enums. |
-| `qf_spawn_audit` | Inspect spawn-only workflow coverage and helper routing. |
-| `qf_project_lint_layout` | Report workspace layout expectations and generated multi-file module/use wiring. |
-
-## Workspace Expectations
-
-Quartz Forge currently expects to run inside the FlowMake workspace root.
-
-Minimum expected layout:
+Quartz Forge expects a FlowMake-style workspace layout:
 
 ```text
 FlowMake/
   quartz/
   quartz_forge/
   quartz_ai_api_cache/
-  .vscode/
 ```
 
-Important assumptions:
+Required files used by MCP and parity checks:
 
-- `quartz/api.txt` must exist.
-- `quartz/src/types/action.rs` and `quartz/src/types/condition.rs` must exist.
-- `quartz_forge/src/core/quartz_domain.rs` is used as the editor-side truth for parity checks.
-- Quartz Forge MCP auto-discovers the FlowMake root by walking upward from its current directory.
+- `quartz/api.txt`
+- `quartz/src/types/action.rs`
+- `quartz/src/types/condition.rs`
 
-## Quick Start
+## Run Quartz Forge
 
-### Run the editor
-
-From the FlowMake root:
+From workspace root:
 
 ```powershell
 cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge
 ```
 
-### Open or create a project
+Health check:
 
-- Launch Quartz Forge.
-- Create a new project or open an existing Quartz Forge project.
-- Use the scene canvas, object menu, event builder, and custom code windows to start authoring.
-
-### Generate and inspect output
-
-- Use the generated Quartz preview to inspect the current export shape.
-- Write generated files into your project scripts when ready.
-- Use the generated-file browser to inspect or track manual overrides.
+```powershell
+cargo check --manifest-path quartz_forge/Cargo.toml
+```
 
 ## MCP Setup
 
-Quartz Forge includes a dedicated MCP binary: `quartz_forge_mcp`.
+Quartz Forge MCP supports standard JSON-RPC over stdio. This works with VS Code/Copilot and with non-VSCode/non-Copilot MCP clients.
 
-Health check:
+### 1) Build MCP server binary
+
+Option A (recommended in this repo):
+
+```powershell
+Push-Location quartz_forge/mcp_server
+cargo build
+Pop-Location
+```
+
+Option B (workspace crate bin):
+
+```powershell
+cargo build --manifest-path quartz_forge/Cargo.toml --bin quartz_forge_mcp
+```
+
+### 2) Verify server health
 
 ```powershell
 cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge_mcp -- --health
 ```
 
-Run over stdio:
+### 3) Run MCP over stdio
 
 ```powershell
 cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge_mcp -- --stdio
 ```
 
-The FlowMake workspace `.vscode/mcp.json` can point VS Code at this server so chat agents can use the quartz_forge MCP surface directly.
+### VS Code/Copilot wiring
 
-## Text Guidance
+Example local config in `.vscode/mcp.json`:
 
-Quartz Forge now follows the same text pattern found in `ball_swing_game`.
-
-Preferred pattern:
-
-- Build text directly with `Text::new(vec![Span::new(...)], ...)`.
-- Cache fonts with `OnceLock<Font>` plus `Font::from_bytes(include_bytes!(...))`.
-- Use `Some(font_size * 1.25)` for line height unless you have a specific reason not to.
-- Build the `Text` value before calling `Action::SetText` or mutating an object's drawable.
-
-Avoid:
-
-- Treating `canvas.make_text(...)` as the main generated pattern when direct `Text::new` plus `Span::new` is available.
-- Creating text inside a `get_game_object_mut(...)` borrow.
-- Re-parsing the same font bytes every frame.
-
-## Windowing Notes
-
-- The existing collapsible tool windows now dock into a fixed tray when collapsed so they stay easy to find without covering the workspace.
-- Restoring a docked window reopens it through the same egui window id, which preserves its prior position rather than snapping it to a fresh default.
-
-## Architecture Notes
-
-Quartz Forge is intentionally split into focused layers:
-
-- `src/app/` for egui orchestration and editor windows.
-- `src/core/` for project and Quartz-domain models.
-- `src/services/` for code generation, persistence, and preview/hot-reload support.
-- `src/mcp.rs` and `src/bin/quartz_forge_mcp.rs` for the MCP server surface.
-
-That separation keeps UI concerns out of the source-of-truth model and makes it easier for both humans and agents to validate generated Rust against local Quartz APIs.
-
-## Runbook
-
-Useful commands from the FlowMake root:
-
-```powershell
-cargo check --manifest-path quartz_forge/Cargo.toml
-cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge
-cargo run --manifest-path quartz_forge/Cargo.toml --bin quartz_forge_mcp -- --health
+```json
+{
+  "servers": {
+    "quartz_forge_mcp": {
+      "command": "c:/Users/ArtistRyzenWhite/RProjects/FlowMake/quartz_forge/mcp_server/target/debug/quartz_forge_mcp.exe",
+      "args": ["--stdio"]
+    }
+  }
+}
 ```
+
+### Non-VSCode / non-Copilot MCP clients
+
+Use the same stdio command and register it in your client's MCP configuration (as a stdio server command + args).
+
+Command template:
+
+```text
+command: <path-to-quartz_forge_mcp>
+args: ["--stdio"]
+```
+
+Minimal JSON-RPC methods expected by this server:
+
+- `initialize`
+- `tools/list`
+- `tools/call`
+- `ping`
+
+Operational flags:
+
+- `--stdio` start MCP server loop
+- `--health` print JSON health summary
+- `--lock-status` print lock/heartbeat status JSON
+
+## Major MCP Tools (High Value)
+
+- `qf_api_lookup`: source-backed API lookup (`quartz/api.txt`, action/condition source, forge domain source)
+- `qf_api_verify_snippet`: validate snippet shape and detect common drift/anti-patterns
+- `qf_project_state_dump`: load project and return structured manifest + sync report
+- `qf_project_apply_state`: write manifest and optionally regenerate files/snapshot
+- `qf_project_import_semantic`: import supported files into manifest; can fallback to ManualFileOverride
+- `qf_project_sync_status`: report save/export drift status
+- `qf_forge_check_parity`: compare editor/codegen support with Quartz action/condition surfaces
+- `qf_project_lint_layout`: validate project layout and generated routing assumptions
+
+## MCP Adequacy Checklist For AI Coding
+
+Use this checklist to ensure an AI workflow is grounded in current Quartz Forge constraints:
+
+1. Start with `qf_codegen_api_guidance` before generating gameplay code.
+2. Validate uncertain API usage with `qf_api_lookup` and `qf_api_verify_snippet`.
+3. For project edits, prefer `qf_project_state_dump` plus `qf_project_apply_state` over ad-hoc Rust rewrites.
+4. After generation/import, run `qf_project_sync_status` and review drift before further edits.
+5. Use `qf_forge_check_parity` when adding new Action/Condition-driven workflows.
+6. Keep import fallback enabled (`qf_project_import_semantic` with `fallback_manual_overrides=true`) until full semantic coverage is confirmed for your file shapes.
+
+## Cautions and Known Risk Areas
+
+Use these as operational guardrails while the project is still under active stabilization:
+
+- Semantic import coverage is still evolving for complex source shapes.
+- Generated file organization can differ from hand-authored ordering even when behavior is preserved.
+- Roundtrip cycles can expose omissions or reorderings; validate diffs after import/export.
+- Prefer incremental changes and short validation loops over large one-shot project rewrites.
+- Keep backups of hand-authored files before first semantic import on older projects.
+
+## Recommended Validation Loop
+
+1. Export generated files.
+2. Build and run game (`cargo run` in target project).
+3. Re-import semantically.
+4. Diff key scene files.
+5. Rebuild and verify behavior.
+6. Report drift/omissions with file diff and runtime symptom.
+
+This loop is mandatory for high-confidence AI-assisted workflows at the current project stage.
+
+For operator-friendly execution, use [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.md).
+
+## Architecture Overview
+
+- `src/app/`: egui editor windows and interaction orchestration
+- `src/core/`: project and Quartz-domain models
+- `src/services/`: codegen, import, persistence, sync
+- `src/mcp.rs`: MCP server entry and tool routing
+- `src/bin/quartz_forge_mcp.rs`: MCP bin launcher
+
+## User Manual
+
+For full setup, workflows, troubleshooting, and AI-agent guidance, see [USER_MANUAL.md](USER_MANUAL.md).
