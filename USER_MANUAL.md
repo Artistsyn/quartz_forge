@@ -50,10 +50,9 @@ Operational recommendation:
 Workspace shape expected:
 
 ```text
-FlowMake/
-  quartz/
+Workspace_Root/
+  quartz/  
   quartz_forge/
-  quartz_ai_api_cache/
 ```
 
 Required source files used by MCP/parity checks:
@@ -61,6 +60,12 @@ Required source files used by MCP/parity checks:
 - `quartz/api.txt`
 - `quartz/src/types/action.rs`
 - `quartz/src/types/condition.rs`
+
+Optional local helper data:
+
+- `quartz_ai_api_cache/`
+
+Quartz Forge MCP does not require a private `.agent` memory setup or a local Quartz AI cache in order to work for other users. The baseline requirement is the workspace-local Quartz source tree plus Quartz Forge itself.
 
 Tooling:
 
@@ -146,6 +151,8 @@ Required methods implemented:
 - `tools/list`
 - `tools/call`
 - `ping`
+
+This setup is intentionally portable and does not depend on personal memory files or cached API packs.
 
 ## 7. Core User Workflows
 

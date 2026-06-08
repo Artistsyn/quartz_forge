@@ -6,9 +6,7 @@ Quartz Forge is a Quartz-native game authoring environment for the FlowMake work
 
 - User manual: [USER_MANUAL.md](USER_MANUAL.md)
 - Operator checklist: [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.md)
-- API coverage checklist: [QUARTZ_API_COVERAGE_CHECKLIST.md](QUARTZ_API_COVERAGE_CHECKLIST.md)
 - MCP tool catalog: [QUARTZ_FORGE_MCP_TOOL_CATALOG.md](QUARTZ_FORGE_MCP_TOOL_CATALOG.md)
-- MCP implementation plan: [QUARTZ_FORGE_MCP_SERVER_IMPLEMENTATION_PLAN.md](QUARTZ_FORGE_MCP_SERVER_IMPLEMENTATION_PLAN.md)
 
 ## Current Stage (Read First)
 
@@ -38,7 +36,6 @@ Quartz Forge expects a FlowMake-style workspace layout:
 FlowMake/
   quartz/
   quartz_forge/
-  quartz_ai_api_cache/
 ```
 
 Required files used by MCP and parity checks:
@@ -46,6 +43,12 @@ Required files used by MCP and parity checks:
 - `quartz/api.txt`
 - `quartz/src/types/action.rs`
 - `quartz/src/types/condition.rs`
+
+Optional, but useful for local API reference workflows:
+
+- `quartz_ai_api_cache/`
+
+Quartz Forge MCP and the in-repo tools do not require any personal `.agent` memory setup or a local Quartz AI cache to function. Those can improve convenience on a developer machine, but they are not part of the baseline requirement for other users.
 
 ## Run Quartz Forge
 
