@@ -234,7 +234,7 @@ fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Val
         })),
         "qf_codegen_api_guidance" => Ok(json!({
             "tool": tool_name,
-            "guidance": codegen_api_guidance(),
+            "guidance": codegen_api_guidance(paths),
         })),
         "qf_background_plugin_contract" => Ok(json!({
             "tool": tool_name,
@@ -583,6 +583,66 @@ fn project_lint_layout(paths: &WorkspacePaths, project_root: Option<&str>) -> Re
                     scene.name, source
                 ));
             }
+
+            // Pool contract: template must exist, be spawn_only, and be
+            // manually controlled (gravity 0) or parked instances accumulate
+            // momentum offscreen and fly on first spawn.
+            for pool in &scene.pools {
+                match scene.objects.iter().find(|o| o.id == pool.template_object_id) {
+                    None => errors.push(format!(
+                        "Scene '{}' pool '{}' references missing template object '{}'",
+                        scene.name, pool.pool_tag, pool.template_object_id
+                    )),
+                    Some(template) => {
+                        if !template.spawn_only {
+                            errors.push(format!(
+                                "Scene '{}' pool '{}' template '{}' must be spawn_only (template factory required)",
+                                scene.name, pool.pool_tag, pool.template_object_id
+                            ));
+                        }
+                        if template.advanced.gravity != 0.0 {
+                            warnings.push(format!(
+                                "Scene '{}' pool '{}' template has gravity {} — pooled objects should be \
+                                 manually controlled (gravity 0.0) or they accumulate momentum while parked",
+                                scene.name, pool.pool_tag, template.advanced.gravity
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Plugin-dispatch safety: PluginCall/RunPlugin against a plugin
+            // that is never registered compiles and silently no-ops at
+            // runtime. Walk the whole scene (events, logic trees, nested
+            // Multi/Conditional) via its JSON form so no nesting is missed.
+            let dispatched = collect_plugin_dispatch_names(scene);
+            for dispatch_name in dispatched {
+                // The composited-background pipeline registers BackgroundPlugin
+                // (dispatch name "background") itself in plugin-cache mode, so
+                // RunPlugin("background", "set:..|transition:..") is covered.
+                let background_registered = dispatch_name == "background"
+                    && scene.background.enabled
+                    && scene.background.use_plugin_cache;
+                let registered = background_registered
+                    || scene.required_plugins.iter().any(|reg| {
+                        crate::core::project::PluginRegistration::known_dispatch_name(&reg.type_name)
+                            .map(|n| n == dispatch_name)
+                            .unwrap_or(false)
+                            || reg.type_name == dispatch_name
+                    });
+                if !registered {
+                    let hint = crate::core::project::PluginRegistration::type_for_dispatch_name(
+                        &dispatch_name,
+                    )
+                    .map(|t| format!(" Add '{t}' to the scene's required_plugins."))
+                    .unwrap_or_default();
+                    errors.push(format!(
+                        "Scene '{}' dispatches to plugin '{}' but never registers it — \
+                         this compiles and silently does nothing at runtime.{}",
+                        scene.name, dispatch_name, hint
+                    ));
+                }
+            }
         }
     }
 
@@ -605,6 +665,123 @@ fn project_lint_layout(paths: &WorkspacePaths, project_root: Option<&str>) -> Re
             "constants/game_state custom code defaults are src/constants.rs and src/game_state.rs"
         ]
     }))
+}
+
+// ── Pipeline layer coverage (parity is a pipeline property) ──────────────────
+
+struct ForgeLayerSources {
+    codegen: String,
+    import: String,
+    ui: String,
+}
+
+fn forge_layer_sources(paths: &WorkspacePaths) -> Result<ForgeLayerSources> {
+    let read = |rel: &str| -> String {
+        fs::read_to_string(paths.root.join(rel)).unwrap_or_default()
+    };
+    Ok(ForgeLayerSources {
+        codegen: format!(
+            "{}\n{}",
+            read("quartz_forge/src/services/codegen.rs"),
+            read("quartz_forge/src/services/codegen_text.rs"),
+        ),
+        import: read("quartz_forge/src/services/project_import.rs"),
+        ui: format!(
+            "{}\n{}",
+            read("quartz_forge/src/app/editors.rs"),
+            read("quartz_forge/src/app/condition_editor.rs"),
+        ),
+    })
+}
+
+fn layer_missing(variants: &[String], haystack: &str, prefix: &str) -> Vec<String> {
+    variants
+        .iter()
+        .filter(|v| !haystack.contains(&format!("{prefix}::{v}")))
+        .cloned()
+        .collect()
+}
+
+/// Live per-layer coverage scan. A variant "covered" in a layer means the
+/// layer's source references it structurally; a variant missing from the
+/// import layer still round-trips behaviorally (raw-blob fallback) but loses
+/// visual editability in the UI.
+fn pipeline_layer_coverage(
+    paths: &WorkspacePaths,
+    action_forge: &[String],
+    condition_forge: &[String],
+) -> Result<Value> {
+    let sources = forge_layer_sources(paths)?;
+
+    let layer = |variants: &[String], prefix: &str| -> Value {
+        let codegen_missing = layer_missing(variants, &sources.codegen, prefix);
+        let import_missing = layer_missing(variants, &sources.import, prefix);
+        let ui_missing = layer_missing(variants, &sources.ui, prefix);
+        json!({
+            "total": variants.len(),
+            "codegen_missing": codegen_missing,
+            "import_missing": import_missing,
+            "ui_missing": ui_missing,
+        })
+    };
+
+    Ok(json!({
+        "note": "Parity must hold at EVERY layer: domain enum, codegen emission, semantic import, UI editing. \
+                 import_missing variants degrade to raw Expr blobs on import — behavior preserved, visual editing lost.",
+        "action": layer(action_forge, "QuartzAction"),
+        "condition": layer(condition_forge, "QuartzCondition"),
+    }))
+}
+
+/// Count raw `Expr { raw }` action/condition blobs anywhere in a scene's JSON
+/// form — the editability-loss metric surfaced by qf_project_sync_status.
+fn count_raw_expr_blobs(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            let own = usize::from(
+                map.len() == 1
+                    && map.get("Expr")
+                        .and_then(Value::as_object)
+                        .is_some_and(|inner| inner.contains_key("raw")),
+            );
+            own + map.values().map(count_raw_expr_blobs).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_raw_expr_blobs).sum(),
+        _ => 0,
+    }
+}
+
+/// Collect every plugin dispatch name (PluginCall/RunPlugin `name` fields)
+/// used anywhere in a scene, at any nesting depth, by walking its JSON form.
+fn collect_plugin_dispatch_names(scene: &crate::core::project::SceneDocument) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    if let Ok(value) = serde_json::to_value(scene) {
+        walk_for_plugin_dispatch(&value, &mut names);
+    }
+    names.into_iter().collect()
+}
+
+fn walk_for_plugin_dispatch(value: &Value, names: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                if key == "PluginCall" || key == "RunPlugin" {
+                    if let Some(name) = inner.get("name").and_then(Value::as_str) {
+                        if !name.trim().is_empty() {
+                            names.insert(name.trim().to_owned());
+                        }
+                    }
+                }
+                walk_for_plugin_dispatch(inner, names);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                walk_for_plugin_dispatch(item, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn api_lookup(paths: &WorkspacePaths, query: &str, limit: usize) -> Result<Vec<Value>> {
@@ -753,9 +930,36 @@ fn text_knowledge(paths: &WorkspacePaths) -> Result<Value> {
     }))
 }
 
-fn codegen_api_guidance() -> Value {
+fn codegen_api_guidance(paths: &WorkspacePaths) -> Value {
+    // Live import-coverage: computed from the import parser source at call
+    // time so this guidance can never drift from reality. Variants in the
+    // blob-degrading list still round-trip behaviorally but import as raw
+    // Expr blobs (no structured UI editing) — prefer covered variants.
+    let import_coverage = enum_variants(&paths.forge_domain_rs, "QuartzAction")
+        .ok()
+        .and_then(|actions| {
+            let conditions = enum_variants(&paths.forge_domain_rs, "QuartzCondition").ok()?;
+            let sources = forge_layer_sources(paths).ok()?;
+            let blob_actions = layer_missing(&actions, &sources.import, "QuartzAction");
+            let blob_conditions = layer_missing(&conditions, &sources.import, "QuartzCondition");
+            Some(json!({
+                "note": "Computed live from project_import.rs. Actions/conditions listed under blob_degrading \
+                         still round-trip behaviorally but arrive as raw Expr blobs in the editor (no structured \
+                         visual editing). Everything else imports fully structured.",
+                "action_total": actions.len(),
+                "blob_degrading_actions": blob_actions,
+                "condition_total": conditions.len(),
+                "blob_degrading_conditions": blob_conditions,
+                "normalized_on_import": ["CollisionWith -> Collision", "VarCompare -> Compare"],
+            }))
+        })
+        .unwrap_or_else(|| json!({"note": "coverage scan unavailable"}));
+
     json!({
         "mandate": "Exhaust native Quartz API before writing custom Rust. This is a HARD RULE enforced by quartz_forge and copilot-instructions.md §5b.",
+        "import_coverage": import_coverage,
+        "plugin_registration_rule": "Plugins do NOT auto-register. Any scene using Action::PluginCall or Action::RunPlugin MUST emit canvas.add_plugin(<Plugin>::new(...)) at the top of setup_scene (imported into SceneDocument.required_plugins). qf_project_lint_layout reports dispatch-without-registration as an error.",
+        "pool_contract": "Pools: emit canvas.create_pool(\"tag\", spawn_<template_id>(canvas), count) at the END of setup_scene with a spawn_only template object (imports into SceneDocument.pools). Template MUST be manually controlled (gravity 0.0) or parked instances accumulate momentum offscreen and fly on first spawn. pool_acquire resets ONLY position + momentum — reset rotation/color/scale/animation in the spawner. Release with canvas.pool_release(name).",
         "gui_codegen_shape_contract": {
             "intent": "AI-generated game source should mirror quartz_forge GUI export shape so semantic import can recover structured entities reliably.",
             "required_functions": [
@@ -1160,11 +1364,34 @@ fn project_sync_status(paths: &WorkspacePaths, project_root: &str) -> Result<Val
     let (state, report) = persistence::load_project_with_sync(&root)
         .with_context(|| format!("failed to load quartz_forge project at {}", root.display()))?;
 
+    // Editability health: how much of this project is opaque to the visual
+    // editor. Raw Expr blobs and ManualFileOverride blocks round-trip
+    // behaviorally but cannot be edited structurally in the UI.
+    let mut raw_blob_count = 0usize;
+    let mut manual_override_files = Vec::<String>::new();
+    for scene in &state.manifest.scenes {
+        if let Ok(value) = serde_json::to_value(scene) {
+            raw_blob_count += count_raw_expr_blobs(&value);
+        }
+        for block in &scene.custom_code_blocks {
+            if block.kind == crate::core::quartz_domain::CustomCodeKind::ManualFileOverride {
+                manual_override_files.push(block.output_file.clone());
+            }
+        }
+    }
+
     Ok(json!({
         "project_root": root,
         "project_name": state.manifest.project_name,
         "active_scene_id": state.manifest.active_scene_id,
         "scene_count": state.manifest.scenes.len(),
+        "editability": {
+            "raw_expr_blob_count": raw_blob_count,
+            "manual_override_files": manual_override_files,
+            "note": "Blobs and overrides preserve behavior but are invisible to structured editing. \
+                     Rising counts mean AI-generated code is drifting outside the importable surface — \
+                     check qf_codegen_api_guidance import_coverage.",
+        },
         "status": match report.status {
             persistence::ProjectSyncStatus::MissingSnapshot => "missing_snapshot",
             persistence::ProjectSyncStatus::InSync => "in_sync",
@@ -1247,6 +1474,12 @@ fn parity_report(paths: &WorkspacePaths, surface: &str) -> Result<Value> {
         .cloned()
         .collect();
 
+    // Parity is a PIPELINE property, not an enum property. The domain enum
+    // having a variant means nothing if codegen cannot emit it, import cannot
+    // re-parse it (visual editability degrades to a raw blob), or the UI
+    // cannot edit it. Measure every layer from source, live.
+    let pipeline = pipeline_layer_coverage(paths, &action_forge, &condition_forge)?;
+
     let mut report = serde_json::Map::new();
     if surface == "action" || surface == "all" {
         report.insert(
@@ -1267,6 +1500,9 @@ fn parity_report(paths: &WorkspacePaths, surface: &str) -> Result<Value> {
                 "missing_in_forge": condition_missing,
             }),
         );
+    }
+    if surface == "all" || surface == "action" || surface == "condition" {
+        report.insert("pipeline".to_owned(), pipeline);
     }
     if surface == "wiring" || surface == "all" {
         let codegen_text = fs::read_to_string(paths.root.join("quartz_forge/src/services/codegen.rs"))
@@ -1653,6 +1889,39 @@ mod tests {
             current.is_empty(),
             "Action parity should be complete after P6, but missing variants remain: {:?}",
             current
+        );
+    }
+
+    /// Parity is a PIPELINE property. The domain enum being complete means
+    /// nothing if codegen cannot emit a variant or import degrades it to a
+    /// raw blob. This is the honest version of the P6 assertion above — it
+    /// would have caught the 21-action import gap that shipped under a green
+    /// domain-parity light.
+    #[test]
+    fn pipeline_parity_codegen_and_import_fully_cover_actions() {
+        let paths = test_workspace_paths();
+        let report = parity_report(&paths, "all").unwrap();
+        let pipeline = &report["pipeline"]["action"];
+
+        let codegen_missing: Vec<_> = pipeline["codegen_missing"]
+            .as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(
+            codegen_missing.is_empty(),
+            "codegen cannot emit these actions: {codegen_missing:?}"
+        );
+
+        let import_missing: Vec<_> = pipeline["import_missing"]
+            .as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(
+            import_missing.is_empty(),
+            "these actions degrade to raw blobs on import (visual editing lost): {import_missing:?}"
+        );
+
+        let ui_missing: Vec<_> = pipeline["ui_missing"]
+            .as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(
+            ui_missing.is_empty(),
+            "these actions have no structured UI editing: {ui_missing:?}"
         );
     }
 

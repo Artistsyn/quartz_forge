@@ -419,6 +419,47 @@ impl QuartzForgeApp {
                 if let Some(action) = event.action.as_mut() {
                     ui.separator();
                     ui.label("Event Action");
+                    // Quick-add: pre-fill the BackgroundPlugin transition shape
+                    // so users don't hand-type the stringly-typed payload.
+                    // Enabled only when the scene actually defines backgrounds.
+                    let bg_keys = &editor_suggestions.background_keys;
+                    ui.horizontal(|ui| {
+                        let enabled = !bg_keys.is_empty();
+                        if ui
+                            .add_enabled(enabled, egui::Button::new("⟳ Background transition"))
+                            .on_hover_text(
+                                "Set this event's action to a background crossfade \
+                                 (RunPlugin \"background\" → transition:from,to,seconds).",
+                            )
+                            .on_disabled_hover_text(
+                                "Define backgrounds first in the Background Authoring window.",
+                            )
+                            .clicked()
+                        {
+                            let from = bg_keys.first().cloned().unwrap_or_else(|| "main".to_owned());
+                            let to = bg_keys.get(1).cloned().unwrap_or_else(|| from.clone());
+                            *action = QuartzAction::RunPlugin {
+                                name: "background".to_owned(),
+                                data: format!("transition:{from},{to},1"),
+                            };
+                            changed = true;
+                        }
+                        if ui
+                            .add_enabled(enabled, egui::Button::new("⇥ Background switch"))
+                            .on_hover_text(
+                                "Set this event's action to an instant background switch \
+                                 (RunPlugin \"background\" → set:key).",
+                            )
+                            .clicked()
+                        {
+                            let key = bg_keys.first().cloned().unwrap_or_else(|| "main".to_owned());
+                            *action = QuartzAction::RunPlugin {
+                                name: "background".to_owned(),
+                                data: format!("set:{key}"),
+                            };
+                            changed = true;
+                        }
+                    });
                     changed |= Self::edit_action(ui, action, &editor_suggestions);
                 }
             }

@@ -349,8 +349,12 @@ fn ensure_cargo_toml(state: &EditorProjectState, root: &Path) -> Result<()> {
     }
 
     let crate_name = slugify_crate_name(&state.manifest.project_name);
+    // The managed main.rs calls `main::maverick_main()` — the lib crate MUST
+    // be named "main" (mirroring the ball_swing_game reference layout) or the
+    // generated bin fails with E0433. staticlib/cdylib keep mobile targets
+    // viable; rlib is what the desktop bin links against.
     let cargo = format!(
-        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nramp = {{ package = \"ramp2\", path = \"../ramp\" }}\nquartz = {{ path = \"../quartz\" }}\n",
+        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"main\"\ncrate-type = [\"staticlib\", \"cdylib\", \"rlib\"]\n\n[dependencies]\nramp = {{ package = \"ramp2\", path = \"../ramp\" }}\nquartz = {{ path = \"../quartz\" }}\n",
         crate_name
     );
     std::fs::write(&path, cargo)

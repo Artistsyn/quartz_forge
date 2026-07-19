@@ -15,8 +15,13 @@ Quartz Forge is actively evolving. It is usable and productive, but still under 
 What this means in practice:
 
 - You should assume import and file-generation edge cases still exist.
-- Roundtrip behavior is improving quickly, but not all source shapes are semantically imported with full fidelity yet.
-- API coverage is broad, but not complete for every Action/Condition/editor workflow.
+- Action/Condition pipeline parity is now complete at all four layers (domain, codegen, semantic
+  import, UI editing) and enforced by the `pipeline_parity_*` test plus `qf_forge_check_parity`'s
+  `pipeline` report section. Unknown/exotic source shapes still fall back to raw Expr blobs
+  (behavior preserved, visual editing lost) — `qf_project_sync_status` reports the blob count.
+- Plugin registrations (`canvas.add_plugin`) and object pools (`canvas.create_pool`) are
+  first-class manifest entities: emitted by codegen, imported semantically, and linted
+  (dispatch-without-registration is an error).
 - Manual verification after major import/export cycles is still recommended.
 - We are explicitly collecting user feedback to drive stabilization toward release-readiness, but we are not release-ready yet.
 

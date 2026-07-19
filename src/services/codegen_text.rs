@@ -71,7 +71,13 @@ pub(crate) fn target_expr(target: &QuartzTargetRef) -> String {
 
 pub(crate) fn location_expr(location: &QuartzLocationRef) -> String {
     match location {
-        QuartzLocationRef::At { x, y } => format!("Location::at({x}, {y})"),
+        // f32 Display drops the trailing .0 on whole numbers, which emits
+        // integer literals the engine rejects (Location::at takes f32).
+        QuartzLocationRef::At { x, y } => format!(
+            "Location::at({}, {})",
+            crate::services::codegen::f32_lit(*x),
+            crate::services::codegen::f32_lit(*y)
+        ),
         QuartzLocationRef::AtTarget(target) => format!("Location::at_target({})", target_expr(target)),
     }
 }

@@ -10,7 +10,7 @@ use crate::services::codegen_text::{
     physics_material_expr, scroll_axis_expr, target_expr, gravity_falloff_expr,
 };
 
-fn f32_lit(value: f32) -> String {
+pub(crate) fn f32_lit(value: f32) -> String {
     if !value.is_finite() {
         return "0.0".to_owned();
     }
@@ -35,14 +35,300 @@ fn looks_like_rust_condition_expr(raw: &str) -> bool {
     trimmed.starts_with("Condition::") || trimmed.starts_with("Condition ::")
 }
 
+/// `use` lines needed at the top of a scene file for its scene-level entities
+/// (plugin registrations, background layer types). Deduped + sorted.
+pub fn scene_extra_use_lines(scene: &crate::core::project::SceneDocument) -> String {
+    let mut use_lines: Vec<String> = scene
+        .required_plugins
+        .iter()
+        .filter_map(|reg| {
+            crate::core::project::PluginRegistration::known_use_path(&reg.type_name)
+                .map(|p| format!("use {p};\n"))
+        })
+        .collect();
+    if scene.background.enabled && !scene.background.layers.is_empty() {
+        // ResizeFilter is only needed when an Image layer is present (quartz
+        // re-exports it from the background module).
+        let needs_filter = scene
+            .background
+            .resolved_backgrounds()
+            .iter()
+            .any(|nb| nb.layers.iter().any(|l| matches!(l, crate::core::project::BackgroundLayerSpec::Image { .. })));
+        let mut names = vec!["LayeredBackground", "BackgroundLayer"];
+        if scene.background.use_plugin_cache {
+            names.push("BackgroundPlugin");
+        }
+        if needs_filter {
+            names.push("ResizeFilter");
+        }
+        names.sort_unstable();
+        use_lines.push(format!("use quartz::plugin::background::{{{}}};\n", names.join(", ")));
+    }
+    use_lines.sort();
+    use_lines.dedup();
+    use_lines.concat()
+}
+
+/// `canvas.add_plugin(...)` lines — emitted FIRST in setup_scene. Plugins do
+/// not auto-register; dispatch to an unregistered plugin silently no-ops.
+pub fn scene_plugin_register_lines(scene: &crate::core::project::SceneDocument) -> String {
+    scene
+        .required_plugins
+        .iter()
+        .map(|reg| format!("    canvas.add_plugin({});\n", reg.init_expr.trim()))
+        .collect()
+}
+
+/// `canvas.create_pool(tag, spawn_x(canvas), n)` lines with contract warnings.
+pub fn scene_pool_lines(scene: &crate::core::project::SceneDocument) -> String {
+    let mut out = String::new();
+    for pool in &scene.pools {
+        let Some(template) = scene.objects.iter().find(|o| o.id == pool.template_object_id) else {
+            out.push_str(&format!(
+                "    // WARNING: pool '{}' references missing template object '{}'\n",
+                pool.pool_tag, pool.template_object_id
+            ));
+            continue;
+        };
+        if !template.spawn_only {
+            out.push_str(&format!(
+                "    // WARNING: pool '{}' template '{}' is not spawn_only — no template factory generated\n",
+                pool.pool_tag, pool.template_object_id
+            ));
+            continue;
+        }
+        if template.advanced.gravity != 0.0 {
+            out.push_str(&format!(
+                "    // WARNING: pool '{}' template has non-zero gravity — parked instances accumulate momentum\n",
+                pool.pool_tag
+            ));
+        }
+        // Hoist the template into a local: passing spawn_x(canvas) directly as
+        // an argument to canvas.create_pool double-borrows canvas (E0499).
+        let local = format!("__pool_{}", sanitize_ident(&pool.pool_tag));
+        out.push_str(&format!(
+            "    let {local} = {}(canvas);\n    canvas.create_pool({}, {local}, {});\n",
+            object_function_name(template),
+            rust_str_lit(&pool.pool_tag),
+            pool.count
+        ));
+    }
+    out
+}
+
+/// Reduce an arbitrary tag to a safe Rust identifier fragment.
+fn sanitize_ident(raw: &str) -> String {
+    let mut s: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if s.is_empty() || s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        s.insert(0, '_');
+    }
+    s
+}
+
+/// Camera follow + initial zoom via `canvas.camera_mut()`.
+pub fn scene_camera_lines(scene: &crate::core::project::SceneDocument) -> String {
+    let cam = &scene.camera;
+    let needs_zoom = (cam.initial_zoom - 1.0).abs() > f32::EPSILON;
+    if !cam.follow_enabled && !needs_zoom {
+        return String::new();
+    }
+    let mut inner = String::new();
+    if cam.follow_enabled {
+        inner.push_str(&format!(
+            "        cam.follow(Some({}));\n",
+            target_expr(&cam.follow_target)
+        ));
+    }
+    if needs_zoom {
+        let method = if cam.smooth_initial_zoom { "smooth_zoom" } else { "snap_zoom" };
+        inner.push_str(&format!("        cam.{}({});\n", method, f32_lit(cam.initial_zoom)));
+    }
+    format!("    if let Some(cam) = canvas.camera_mut() {{\n{inner}    }}\n")
+}
+
+/// Full-screen composited background object. Renders (unlike BackgroundPlugin).
+pub fn scene_background_lines(scene: &crate::core::project::SceneDocument) -> String {
+    let bg = &scene.background;
+    if !bg.enabled || bg.layers.is_empty() {
+        return String::new();
+    }
+    let (w_lit, h_lit) = (f32_lit(scene.canvas.virtual_width), f32_lit(scene.canvas.virtual_height));
+    let wu = scene.canvas.virtual_width.max(1.0) as u32;
+    let hu = scene.canvas.virtual_height.max(1.0) as u32;
+    let id = &bg.object_id;
+    let resolved = bg.resolved_backgrounds();
+
+    // Build a LayeredBackground chain expression for a named background.
+    let layered_expr = |nb: &crate::core::project::NamedBackground| -> String {
+        let [tr, tg, tb] = nb.tint;
+        let mut s = String::from("LayeredBackground::new()\n");
+        for layer in &nb.layers {
+            s.push_str(&format!("            .with_layer({})\n", background_layer_expr(layer)));
+        }
+        s.push_str(&format!("            .with_tint(({tr}, {tg}, {tb}))"));
+        s
+    };
+
+    let mut out = String::new();
+
+    if bg.use_plugin_cache {
+        // Plugin-cache mode: BackgroundPlugin composites + disk-caches every
+        // named background, then the active image is pulled via current_image()
+        // onto the background object. The plugin is authoring/caching infra;
+        // the game renders the object (existing API), not the plugin. Runtime
+        // switching/crossfade: Action::RunPlugin { name:"background",
+        // data:"set:key" | "transition:from,to,dur" }.
+        let active = bg.effective_active_key();
+        let cache = if bg.cache_dir.trim().is_empty() {
+            "None".to_owned()
+        } else {
+            format!("Some({})", rust_str_lit(bg.cache_dir.trim()))
+        };
+        out.push_str(&format!("    let mut __{id}_plugin = BackgroundPlugin::new({wu}, {hu});\n"));
+        for nb in &resolved {
+            out.push_str(&format!(
+                "    __{id}_plugin.set_background({}, {}, {cache});\n",
+                rust_str_lit(&nb.key),
+                layered_expr(nb)
+            ));
+        }
+        out.push_str(&format!("    __{id}_plugin.show({});\n", rust_str_lit(&active)));
+        out.push_str(&format!("    canvas.add_plugin(__{id}_plugin);\n"));
+        // Build the object first…
+        out.push_str(&format!(
+            "    let {id} = GameObject::build(\"{id}\")\n        .size({w_lit}, {h_lit})\n        .position(0.0, 0.0)\n        .layer({})\n",
+            bg.render_layer
+        ));
+        if bg.camera_pinned {
+            out.push_str("        .screen_space()\n");
+        }
+        out.push_str("        .finish();\n");
+        out.push_str(&format!("    canvas.add_game_object(\"{id}\".to_owned(), {id});\n"));
+        // …then pull the composited image out of the plugin onto the object.
+        // Clone the image first so the immutable plugin borrow is dropped
+        // before the mutable get_game_object_mut borrow.
+        out.push_str(&format!(
+            "    if let Some(__{id}_composite) = canvas.get_plugin::<BackgroundPlugin>().and_then(|p| p.current_image().cloned()) {{\n"
+        ));
+        out.push_str(&format!(
+            "        if let Some(__{id}_obj) = canvas.get_game_object_mut(\"{id}\") {{\n"
+        ));
+        out.push_str(&format!(
+            "            __{id}_obj.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_composite.into(), color: None }});\n"
+        ));
+        out.push_str("        }\n    }\n");
+    } else {
+        // Direct mode: build the active composite inline every launch (no cache,
+        // no transitions — those need plugin mode).
+        let active_nb = resolved
+            .iter()
+            .find(|nb| nb.key == bg.effective_active_key())
+            .or_else(|| resolved.first())
+            .cloned()
+            .unwrap_or_else(|| crate::core::project::NamedBackground {
+                key: bg.background_key.clone(),
+                tint: bg.tint,
+                layers: bg.layers.clone(),
+            });
+        out.push_str(&format!("    let __{id}_img = {}\n        .build({wu}, {hu});\n", layered_expr(&active_nb)));
+        out.push_str(&format!(
+            "    let mut {id} = GameObject::build(\"{id}\")\n        .size({w_lit}, {h_lit})\n        .position(0.0, 0.0)\n        .layer({})\n",
+            bg.render_layer
+        ));
+        if bg.camera_pinned {
+            out.push_str("        .screen_space()\n");
+        }
+        out.push_str("        .finish();\n");
+        out.push_str(&format!(
+            "    {id}.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_img.into(), color: None }});\n"
+        ));
+        out.push_str(&format!("    canvas.add_game_object(\"{id}\".to_owned(), {id});\n"));
+    }
+    out
+}
+
+/// Per-frame background pull for register_logic — emitted only in plugin-cache
+/// mode with per_frame_pull. Pulls the plugin's current_image() (which the
+/// plugin updates during crossfade transitions) onto the background object
+/// each frame so transitions actually blend on screen.
+pub fn scene_background_update_lines(scene: &crate::core::project::SceneDocument) -> String {
+    let bg = &scene.background;
+    if !bg.enabled || bg.layers.is_empty() || !bg.use_plugin_cache || !bg.per_frame_pull {
+        return String::new();
+    }
+    let id = &bg.object_id;
+    let (w_lit, h_lit) = (f32_lit(scene.canvas.virtual_width), f32_lit(scene.canvas.virtual_height));
+    format!(
+        "    // Per-frame background pull: keeps crossfade transitions on screen.\n\
+             canvas.on_update(|canvas| {{\n\
+                 if let Some(__{id}_frame) = canvas.get_plugin::<BackgroundPlugin>().and_then(|p| p.current_image().cloned()) {{\n\
+                     if let Some(__{id}_obj) = canvas.get_game_object_mut(\"{id}\") {{\n\
+                         __{id}_obj.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_frame.into(), color: None }});\n\
+                     }}\n\
+                 }}\n\
+             }});\n"
+    )
+}
+
+fn background_layer_expr(layer: &crate::core::project::BackgroundLayerSpec) -> String {
+    use crate::core::project::BackgroundLayerSpec as L;
+    match layer {
+        L::Solid { color: [r, g, b] } => {
+            format!("BackgroundLayer::Solid {{ color: ({r}, {g}, {b}) }}")
+        }
+        L::GradientVertical { top: [tr, tg, tb], bottom: [br, bg2, bb] } => format!(
+            "BackgroundLayer::GradientVertical {{ top: ({tr}, {tg}, {tb}), bottom: ({br}, {bg2}, {bb}) }}"
+        ),
+        L::GradientHorizontal { left: [lr, lg, lb], right: [rr, rg, rb] } => format!(
+            "BackgroundLayer::GradientHorizontal {{ left: ({lr}, {lg}, {lb}), right: ({rr}, {rg}, {rb}) }}"
+        ),
+        L::GradientFourCorner {
+            top_left: [a, b, c],
+            top_right: [d, e, f],
+            bottom_left: [g, h, i],
+            bottom_right: [j, k, l],
+        } => format!(
+            "BackgroundLayer::GradientFourCorner {{ top_left: ({a}, {b}, {c}), top_right: ({d}, {e}, {f}), bottom_left: ({g}, {h}, {i}), bottom_right: ({j}, {k}, {l}) }}"
+        ),
+        L::Starfield {
+            density, seed, size_min, size_max, brightness_min, brightness_max, vertical_fade,
+        } => {
+            let fade = match vertical_fade {
+                Some(v) => format!("Some({v})"),
+                None => "None".to_owned(),
+            };
+            format!(
+                "BackgroundLayer::Starfield {{ density: {density}, seed: {seed}, size_range: ({size_min}, {size_max}), brightness_range: ({brightness_min}, {brightness_max}), vertical_fade: {fade}, scale: None }}"
+            )
+        }
+        L::Nebula { color: [r, g, b], density, seed } => format!(
+            "BackgroundLayer::Nebula {{ color: ({r}, {g}, {b}), density: {}, seed: {seed} }}",
+            f32_lit(*density)
+        ),
+        L::Image { asset_path, filter } => {
+            let bytes = asset_include_expr(asset_path).unwrap_or_else(|| "&[]".to_owned());
+            format!(
+                "BackgroundLayer::Image {{ bytes: {bytes}, filter: ResizeFilter::{} }}",
+                filter.variant_name()
+            )
+        }
+    }
+}
+
 pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
     let Some(scene) = state.manifest.scenes.get(state.active_scene_index) else {
         return "// no active scene".to_owned();
     };
 
     let mut out = String::new();
-    out.push_str("use quartz::prelude::*;\n\n");
+    out.push_str("use quartz::prelude::*;\n");
+    out.push_str(&scene_extra_use_lines(scene));
+    out.push('\n');
     out.push_str("pub fn setup_scene(canvas: &mut Canvas) {\n");
+    out.push_str(&scene_plugin_register_lines(scene));
     out.push_str(&scene_setup_physics_lines(scene));
 
     for obj in &scene.objects {
@@ -116,9 +402,57 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
             obj.id
         ));
     }
+
+    // Pre-allocated pools LAST — template factories are defined above.
+    // Pool contract: templates must be manually controlled (gravity 0.0), and
+    // pool_acquire resets only position + momentum.
+    for pool in &scene.pools {
+        let Some(template) = scene
+            .objects
+            .iter()
+            .find(|o| o.id == pool.template_object_id)
+        else {
+            out.push_str(&format!(
+                "    // WARNING: pool '{}' references missing template object '{}'\n",
+                pool.pool_tag, pool.template_object_id
+            ));
+            continue;
+        };
+        if !template.spawn_only {
+            out.push_str(&format!(
+                "    // WARNING: pool '{}' template '{}' is not spawn_only — no template factory was generated\n",
+                pool.pool_tag, pool.template_object_id
+            ));
+            continue;
+        }
+        if template.advanced.gravity != 0.0 {
+            out.push_str(&format!(
+                "    // WARNING: pool '{}' template has non-zero gravity — parked instances accumulate momentum offscreen\n",
+                pool.pool_tag
+            ));
+        }
+        out.push_str(&format!(
+            "    canvas.create_pool({}, {}(canvas), {});\n",
+            rust_str_lit(&pool.pool_tag),
+            object_function_name(template),
+            pool.count
+        ));
+    }
+    if !scene.pools.is_empty() {
+        out.push('\n');
+    }
+
+    // Camera authoring: follow + initial zoom via canvas.camera_mut().
+    out.push_str(&scene_camera_lines(scene));
+    // Composited full-screen background object (renders; unlike BackgroundPlugin).
+    out.push_str(&scene_background_lines(scene));
+
     out.push_str("}\n\n");
 
-    out.push_str("pub fn register_logic(canvas: &mut Canvas) {\n");
+    // Underscore-name unused params so generated files compile warning-free.
+    let bg_update = scene_background_update_lines(scene);
+    let logic_param = if scene.logic_trees.is_empty() && bg_update.is_empty() { "_canvas" } else { "canvas" };
+    out.push_str(&format!("pub fn register_logic({logic_param}: &mut Canvas) {{\n"));
     for tree in &scene.logic_trees {
         out.push_str(&format!("    // Update Script: {}\n", tree.name));
         out.push_str("    canvas.on_update(|canvas| {\n");
@@ -128,16 +462,48 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
         }
         out.push_str("    });\n");
     }
+    out.push_str(&bg_update);
     out.push_str("}\n");
 
     out.push_str("\n");
-    out.push_str("pub fn register_events(canvas: &mut Canvas) {\n");
+    let events_param = if scene.events.is_empty() { "_canvas" } else { "canvas" };
+    out.push_str(&format!("pub fn register_events({events_param}: &mut Canvas) {{\n"));
     for event in &scene.events {
         write_event_binding(&mut out, event, &scene.logic_trees, 1);
     }
     out.push_str("}\n");
 
-    out
+    demote_unneeded_muts(out)
+}
+
+/// Generated builder bindings default to `let mut <id>` but most objects are
+/// never mutated after the chain — demote those to `let` so generated files
+/// compile without unused_mut warnings. A binding keeps `mut` when any later
+/// line starts a `<id>.method(...)` mutation.
+fn demote_unneeded_muts(source: String) -> String {
+    let mut out_lines: Vec<String> = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("let mut ") {
+            if let Some(name) = rest.split([' ', ':', '=']).next() {
+                let mutated_later = lines[idx + 1..].iter().any(|l| {
+                    let t = l.trim_start();
+                    t.starts_with(&format!("{name}.")) && !t.starts_with(&format!("{name}.."))
+                });
+                if !mutated_later && !name.is_empty() {
+                    out_lines.push(line.replacen("let mut ", "let ", 1));
+                    continue;
+                }
+            }
+        }
+        out_lines.push((*line).to_owned());
+    }
+    let mut joined = out_lines.join("\n");
+    if source.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
 }
 
 pub fn generated_file_name(state: &EditorProjectState) -> String {
@@ -174,18 +540,25 @@ pub fn object_function_source(object: &crate::core::quartz_domain::QuartzObjectB
     let mut out = String::new();
     if object.spawn_only {
         // Template functions return a fresh `GameObject` — caller passes it to Action::Spawn.
+        let body = spawn_template_body(object);
+        let param = if body.contains("canvas") { "canvas" } else { "_canvas" };
         out.push_str(&format!(
-            "pub fn {}(canvas: &mut Canvas) -> GameObject {{\n",
+            "pub fn {}({param}: &mut Canvas) -> GameObject {{\n",
             object_function_name(object)
         ));
-        out.push_str(&spawn_template_body(object));
+        out.push_str(&body);
         out.push_str("}\n");
     } else {
-        out.push_str(&format!("pub fn {}(canvas: &mut Canvas) {{\n", object_function_name(object)));
-        out.push_str(&object_registration_body(object));
+        let body = object_registration_body(object);
+        let param = if body.contains("canvas") { "canvas" } else { "_canvas" };
+        out.push_str(&format!(
+            "pub fn {}({param}: &mut Canvas) {{\n",
+            object_function_name(object)
+        ));
+        out.push_str(&body);
         out.push_str("}\n");
     }
-    out
+    demote_unneeded_muts(out)
 }
 
 pub fn event_function_source(
@@ -637,6 +1010,10 @@ fn append_camera_space_builder_lines(
     } else if advanced.ignore_zoom {
         out.push_str("        .ignore_zoom()\n");
     }
+    // NOTE: GameObjectBuilder has NO `.unlit()` method (quartz has no
+    // lighting-opt-out API despite older guidance claiming one). The
+    // `advanced.unlit` field is retained for forward-compat but intentionally
+    // emits nothing — emitting `.unlit()` fails to compile against the engine.
 }
 
 fn append_post_build_lines(
@@ -730,7 +1107,7 @@ fn node_to_action_expr(node: &LogicNode) -> String {
     }
 }
 
-fn action_expr_inner(action: &QuartzAction) -> String {
+pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
     match action {
         QuartzAction::Teleport { target, location } => format!(
             "Action::Teleport {{ target: {}, location: {} }}",
@@ -846,7 +1223,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
                     "Action::SetAnimation {{ target: {}, animation_bytes: {}, fps: {} }}",
                     target_expr(target),
                     bytes_expr,
-                    fps
+                    f32_lit(*fps)
                 )
             } else {
                 "Action::Custom { name: \"missing_animation_asset\".to_owned() }".to_owned()
@@ -859,7 +1236,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         } => format!(
             "Action::PlaySound {{ path: \"{}\".to_owned(), options: SoundOptions::new().volume({}).looping({}) }}",
             path,
-            volume,
+            f32_lit(*volume),
             looping
         ),
         QuartzAction::SetZoom { value } => {
@@ -875,8 +1252,13 @@ fn action_expr_inner(action: &QuartzAction) -> String {
             )
         }
         QuartzAction::RunPlugin { name, data } => {
+            // MUST emit Action::RunPlugin, not PluginCall. The engine routes
+            // RunPlugin -> plugin.on_action(&str) and PluginCall -> on_call(Any).
+            // BackgroundPlugin and SaveGamePlugin implement ONLY on_action, so
+            // coercing to PluginCall made their actions compile and silently
+            // no-op. (terrain_collision implements both, which masked this.)
             format!(
-                "Action::PluginCall {{ name: \"{}\".to_owned(), payload: std::sync::Arc::new(\"{}\".to_owned()) }}",
+                "Action::RunPlugin {{ name: \"{}\".to_owned(), data: \"{}\".to_owned() }}",
                 name, data
             )
         }
@@ -897,7 +1279,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
             let alpha = ((*intensity).clamp(0.0, 1.0) * 255.0).round() as u8;
             format!(
                 "Action::CameraFlash {{ color: Color(255, 255, 255, {}), duration: {} }}",
-                alpha, duration_s
+                alpha, f32_lit(*duration_s)
             )
         }
         QuartzAction::CameraShake {
@@ -905,11 +1287,11 @@ fn action_expr_inner(action: &QuartzAction) -> String {
             duration_s,
         } => format!(
             "Action::CameraShake {{ intensity: {}, duration: {} }}",
-            intensity, duration_s
+            f32_lit(*intensity), f32_lit(*duration_s)
         ),
         QuartzAction::CameraZoomPunch { amount, duration_s } => format!(
             "Action::CameraZoomPunch {{ amount: {}, duration: {} }}",
-            amount, duration_s
+            f32_lit(*amount), f32_lit(*duration_s)
         ),
         QuartzAction::SetMaterial { target, material } => {
             format!(
@@ -920,35 +1302,35 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetDensity { target, value } => format!(
             "Action::SetDensity {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetElasticity { target, value } => format!(
             "Action::SetElasticity {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetFriction { target, value } => format!(
             "Action::SetFriction {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::ApplyForce { target, fx, fy } => format!(
             "Action::ApplyForce {{ target: {}, fx: {}, fy: {} }}",
             target_expr(target),
-            fx,
-            fy
+            f32_lit(*fx),
+            f32_lit(*fy)
         ),
         QuartzAction::ApplyImpulse { target, ix, iy } => format!(
             "Action::ApplyImpulse {{ target: {}, ix: {}, iy: {} }}",
             target_expr(target),
-            ix,
-            iy
+            f32_lit(*ix),
+            f32_lit(*iy)
         ),
         QuartzAction::SetPosition { target, x, y } => format!(
             "Action::SetPosition {{ target: {}, x: {}, y: {} }}",
             target_expr(target),
-            x,
-            y
+            f32_lit(*x),
+            f32_lit(*y)
         ),
         QuartzAction::FreezeBody { target } => {
             format!("Action::FreezeBody {{ target: {} }}", target_expr(target))
@@ -1001,7 +1383,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
             "Action::TransferMomentum {{ from: {}, to: {}, scale: {} }}",
             target_expr(from),
             target_expr(to),
-            scale
+            f32_lit(*scale)
         ),
         QuartzAction::SpawnEmitter { name } => format!(
             "Action::SpawnEmitter {{ emitter: EmitterBuilder::new({:?}).build() }}",
@@ -1034,29 +1416,29 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetEmitterRate { name, value } => format!(
             "Action::SetEmitterRate {{ name: {:?}.to_owned(), value: {} }}",
             name,
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetEmitterLifetime { name, value } => format!(
             "Action::SetEmitterLifetime {{ name: {:?}.to_owned(), value: {} }}",
             name,
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetEmitterVelocity { name, x, y } => format!(
             "Action::SetEmitterVelocity {{ name: {:?}.to_owned(), value: ({}, {}) }}",
             name,
-            x,
-            y
+            f32_lit(*x),
+            f32_lit(*y)
         ),
         QuartzAction::SetEmitterSpread { name, x, y } => format!(
             "Action::SetEmitterSpread {{ name: {:?}.to_owned(), value: ({}, {}) }}",
             name,
-            x,
-            y
+            f32_lit(*x),
+            f32_lit(*y)
         ),
         QuartzAction::SetEmitterSize { name, value } => format!(
             "Action::SetEmitterSize {{ name: {:?}.to_owned(), value: {} }}",
             name,
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetEmitterColor { name, rgba } => {
             let [r, g, b, a] = *rgba;
@@ -1068,7 +1450,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetEmitterGravityScale { name, value } => format!(
             "Action::SetEmitterGravityScale {{ name: {:?}.to_owned(), value: {} }}",
             name,
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetEmitterCollision { name, mode } => {
             let mode_expr = match mode.trim().to_ascii_lowercase().as_str() {
@@ -1090,7 +1472,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetEmitterSizeEnd { name, value } => format!(
             "Action::SetEmitterSizeEnd {{ name: {:?}.to_owned(), value: {} }}",
             name,
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetEmitterColorEnd { name, rgba } => {
             let value_expr = if let Some([r, g, b, a]) = rgba {
@@ -1128,7 +1510,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
             name,
             enabled
         ),
-        QuartzAction::AddZoom { value } => format!("Action::AddZoom {{ value: {} }}", value),
+        QuartzAction::AddZoom { value } => format!("Action::AddZoom {{ value: {} }}", f32_lit(*value)),
         QuartzAction::SmoothZoomAt { delta } => {
             format!("Action::SmoothZoomAt {{ delta: {} }}", delta)
         }
@@ -1156,10 +1538,10 @@ fn action_expr_inner(action: &QuartzAction) -> String {
                 g,
                 b,
                 a,
-                duration_s,
+                f32_lit(*duration_s),
                 mode_expr,
                 ease_expr,
-                intensity,
+                f32_lit(*intensity),
                 freeze_frame_s
             )
         }
@@ -1200,12 +1582,12 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetGravityStrength { target, value } => format!(
             "Action::SetGravityStrength {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetPlanetRadius { target, value } => format!(
             "Action::SetPlanetRadius {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetGravityTarget { target, tag } => format!(
             "Action::SetGravityTarget {{ target: {}, tag: {:?}.to_owned() }}",
@@ -1215,7 +1597,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetGravityInfluenceMult { target, value } => format!(
             "Action::SetGravityInfluenceMult {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetGravityFalloff { target, falloff } => {
             let falloff_expr = match falloff.trim().to_ascii_lowercase().as_str() {
@@ -1241,7 +1623,7 @@ fn action_expr_inner(action: &QuartzAction) -> String {
         QuartzAction::SetAlignToSlopeSpeed { target, value } => format!(
             "Action::SetAlignToSlopeSpeed {{ target: {}, value: {} }}",
             target_expr(target),
-            value
+            f32_lit(*value)
         ),
         QuartzAction::SetVar { name, value } => format!(
             "Action::SetVar {{ name: {:?}.to_owned(), value: {} }}",
@@ -1479,7 +1861,7 @@ fn node_to_action_expr_rec(
     }
 }
 
-fn condition_expr(condition: &QuartzCondition) -> String {
+pub(crate) fn condition_expr(condition: &QuartzCondition) -> String {
     match condition {
         QuartzCondition::Always => "Condition::Always".to_owned(),
         QuartzCondition::KeyHeld { key } => {
@@ -1508,7 +1890,7 @@ fn condition_expr(condition: &QuartzCondition) -> String {
             "Condition::Compare(Expr::var(\"{}\"), {}, Expr::f32({}))",
             variable,
             comp_op_expr(*op),
-            value
+            f32_lit(*value)
         ),
         QuartzCondition::Compare { left, op, right } => format!(
             "Condition::Compare({}, {}, {})",
@@ -1568,10 +1950,10 @@ fn condition_expr(condition: &QuartzCondition) -> String {
             format!("Condition::IsStill({})", target_expr(target))
         }
         QuartzCondition::SpeedAbove { target, value } => {
-            format!("Condition::SpeedAbove({}, {})", target_expr(target), value)
+            format!("Condition::SpeedAbove({}, {})", target_expr(target), f32_lit(*value))
         }
         QuartzCondition::SpeedBelow { target, value } => {
-            format!("Condition::SpeedBelow({}, {})", target_expr(target), value)
+            format!("Condition::SpeedBelow({}, {})", target_expr(target), f32_lit(*value))
         }
         QuartzCondition::CrystallineEnabled => "Condition::CrystallineEnabled".to_owned(),
         QuartzCondition::EmitterActive { emitter } => {
@@ -2070,7 +2452,14 @@ mod tests {
 
         assert!(plugin_code.contains("Action::PluginCall"));
         assert!(plugin_code.contains("payload: std::sync::Arc::new(\"refresh\".to_owned())"));
-        assert!(legacy_plugin_code.contains("Action::PluginCall"));
+        // RunPlugin must NOT be coerced to PluginCall: the engine routes
+        // RunPlugin -> on_action(&str) and PluginCall -> on_call(Any), and
+        // on_action-only plugins (background, save_game) would silently no-op.
+        assert!(
+            legacy_plugin_code.contains("Action::RunPlugin"),
+            "RunPlugin must emit Action::RunPlugin, got: {legacy_plugin_code}"
+        );
+        assert!(legacy_plugin_code.contains("data: \"refresh\".to_owned()"));
 
         assert!(spawn_code.contains("Action::Spawn"));
         assert!(spawn_code.contains("Box::new(spawn_enemy(canvas))"));

@@ -75,6 +75,10 @@ impl ProjectManifest {
             events: Vec::new(),
             custom_code_blocks: default_custom_code_blocks(),
             view_bookmarks: default_scene_view_bookmarks(),
+            required_plugins: Vec::new(),
+            pools: Vec::new(),
+            camera: CameraSpec::default(),
+            background: BackgroundSpec::default(),
         }
     }
 
@@ -148,6 +152,344 @@ pub struct SceneDocument {
     pub custom_code_blocks: Vec<CustomCodeBlock>,
     #[serde(default)]
     pub view_bookmarks: Vec<SceneViewBookmark>,
+    /// Quartz plugins this scene registers at setup. Plugins do NOT
+    /// auto-register in the engine — a scene using Action::PluginCall or
+    /// Action::RunPlugin without a matching registration compiles and then
+    /// silently does nothing at runtime.
+    #[serde(default)]
+    pub required_plugins: Vec<PluginRegistration>,
+    /// Pre-allocated object pools created at the end of setup_scene.
+    #[serde(default)]
+    pub pools: Vec<PoolBlueprint>,
+    /// Runtime camera authoring (follow target, initial zoom).
+    #[serde(default)]
+    pub camera: CameraSpec,
+    /// Composited full-screen background (generates a real background object).
+    #[serde(default)]
+    pub background: BackgroundSpec,
+}
+
+/// Runtime camera authoring for a scene. Emitted into setup_scene via
+/// `canvas.camera_mut()`. Canvas::new installs a default camera, so
+/// `camera_mut()` is Some at setup time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraSpec {
+    /// Emit `cam.follow(Some(Target::...))` when true; otherwise nothing.
+    #[serde(default)]
+    pub follow_enabled: bool,
+    #[serde(default = "default_follow_target")]
+    pub follow_target: QuartzTargetRef,
+    /// Initial zoom applied at setup. 1.0 = no change.
+    #[serde(default = "default_camera_zoom")]
+    pub initial_zoom: f32,
+    /// true → `cam.smooth_zoom(z)`, false → `cam.snap_zoom(z)`. Only emitted
+    /// when initial_zoom differs from 1.0.
+    #[serde(default)]
+    pub smooth_initial_zoom: bool,
+}
+
+fn default_follow_target() -> QuartzTargetRef {
+    QuartzTargetRef::Name("player".to_owned())
+}
+fn default_camera_zoom() -> f32 {
+    1.0
+}
+
+impl Default for CameraSpec {
+    fn default() -> Self {
+        Self {
+            follow_enabled: false,
+            follow_target: default_follow_target(),
+            initial_zoom: 1.0,
+            smooth_initial_zoom: false,
+        }
+    }
+}
+
+/// A composited full-screen background. Generates a real `.unlit()` background
+/// GameObject whose image is built from a `LayeredBackground` — this RENDERS
+/// (unlike BackgroundPlugin, which composites but has no draw hook and is used
+/// by no game). Layers map 1:1 to quartz `BackgroundLayer` variants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Generated background object id.
+    #[serde(default = "default_background_object_id")]
+    pub object_id: String,
+    /// Render layer — should be well below gameplay (default -100).
+    #[serde(default = "default_background_layer")]
+    pub render_layer: i32,
+    /// Pin to the camera (screen-space) vs. world-space.
+    #[serde(default = "default_true")]
+    pub camera_pinned: bool,
+    /// Global tint applied after compositing. [255,255,255] = identity.
+    #[serde(default = "default_white_tint")]
+    pub tint: [u8; 3],
+    pub layers: Vec<BackgroundLayerSpec>,
+    /// When true, author the background THROUGH `BackgroundPlugin`: the plugin
+    /// composites + disk-caches the image (heavy starfield/nebula composites
+    /// are built once and loaded from disk on later launches), then the
+    /// composited image is pulled via `current_image()` onto the background
+    /// object — the image enters the game through existing API, the plugin is
+    /// not relied on to render. When false, the composite is built inline via
+    /// `LayeredBackground::build()` every launch (no cache).
+    #[serde(default)]
+    pub use_plugin_cache: bool,
+    /// Disk cache directory (relative to project root) for plugin-cache mode.
+    #[serde(default = "default_bg_cache_dir")]
+    pub cache_dir: String,
+    /// Primary background key registered with the plugin (plugin-cache mode).
+    #[serde(default = "default_bg_key")]
+    pub background_key: String,
+    /// Additional named backgrounds beyond the primary (plugin-cache mode).
+    /// Enables runtime switching / crossfade transitions between them.
+    #[serde(default)]
+    pub backgrounds: Vec<NamedBackground>,
+    /// Key shown at setup. Empty → the primary (`background_key`).
+    #[serde(default)]
+    pub active_key: String,
+    /// Emit a per-frame `on_update` that pulls `current_image()` onto the
+    /// background object. Required for crossfade transitions to blend on
+    /// screen (the plugin computes the blend in its own on_update; without a
+    /// per-frame pull only the setup-time frame is shown). Plugin-cache only.
+    #[serde(default)]
+    pub per_frame_pull: bool,
+}
+
+impl BackgroundSpec {
+    /// All backgrounds to register, primary first: (key, tint, layers).
+    pub fn resolved_backgrounds(&self) -> Vec<NamedBackground> {
+        let mut out = vec![NamedBackground {
+            key: self.background_key.clone(),
+            tint: self.tint,
+            layers: self.layers.clone(),
+        }];
+        for bg in &self.backgrounds {
+            if bg.key != self.background_key {
+                out.push(bg.clone());
+            }
+        }
+        out
+    }
+
+    /// The key shown at setup (active_key, falling back to the primary).
+    pub fn effective_active_key(&self) -> String {
+        let k = self.active_key.trim();
+        if k.is_empty() {
+            self.background_key.clone()
+        } else {
+            k.to_owned()
+        }
+    }
+}
+
+fn default_bg_cache_dir() -> String {
+    "assets/bg_cache".to_owned()
+}
+fn default_bg_key() -> String {
+    "main".to_owned()
+}
+
+fn default_background_object_id() -> String {
+    "background".to_owned()
+}
+fn default_background_layer() -> i32 {
+    -100
+}
+fn default_true() -> bool {
+    true
+}
+fn default_white_tint() -> [u8; 3] {
+    [255, 255, 255]
+}
+
+impl Default for BackgroundSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            object_id: default_background_object_id(),
+            render_layer: default_background_layer(),
+            camera_pinned: true,
+            tint: [255, 255, 255],
+            layers: Vec::new(),
+            use_plugin_cache: false,
+            cache_dir: default_bg_cache_dir(),
+            background_key: default_bg_key(),
+            backgrounds: Vec::new(),
+            active_key: String::new(),
+            per_frame_pull: false,
+        }
+    }
+}
+
+/// An additional named background beyond the primary. Registered with the
+/// plugin via `set_background(key, ...)`; switch/crossfade to it at runtime
+/// with `Action::RunPlugin { name: "background", data: "set:key" | "transition:from,to,dur" }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamedBackground {
+    pub key: String,
+    #[serde(default = "default_white_tint")]
+    pub tint: [u8; 3],
+    pub layers: Vec<BackgroundLayerSpec>,
+}
+
+/// One background layer — mirrors `quartz::plugin::background::BackgroundLayer`.
+/// Colors are u8 triples (integer literals are correct for these); f32 fields
+/// (nebula density, scale) must be emitted via f32_lit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BackgroundLayerSpec {
+    Solid { color: [u8; 3] },
+    GradientVertical { top: [u8; 3], bottom: [u8; 3] },
+    GradientHorizontal { left: [u8; 3], right: [u8; 3] },
+    GradientFourCorner {
+        top_left: [u8; 3],
+        top_right: [u8; 3],
+        bottom_left: [u8; 3],
+        bottom_right: [u8; 3],
+    },
+    Starfield {
+        density: u32,
+        seed: u64,
+        size_min: u32,
+        size_max: u32,
+        brightness_min: u8,
+        brightness_max: u8,
+        vertical_fade: Option<u32>,
+    },
+    Nebula {
+        color: [u8; 3],
+        density: f32,
+        seed: u64,
+    },
+    /// An image asset composited into the background, resized to the background
+    /// dimensions with the chosen filter. Emits
+    /// `BackgroundLayer::Image { bytes: include_bytes!(..), filter: ResizeFilter::X }`.
+    /// (Enabled once quartz re-exported `ResizeFilter` from the background
+    /// module — before that the variant was unconstructable downstream.)
+    Image {
+        /// Path relative to the project root, e.g. "assets/sky.png".
+        asset_path: String,
+        #[serde(default)]
+        filter: BackgroundResizeFilter,
+    },
+}
+
+/// Mirrors `quartz::plugin::background::ResizeFilter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BackgroundResizeFilter {
+    /// Crisp pixels — pixel art.
+    Nearest,
+    /// Fast and soft (maps to image's Triangle).
+    #[default]
+    Bilinear,
+    /// Smoother and sharper than bilinear (CatmullRom).
+    Bicubic,
+    /// Highest quality, slowest — photos and gradients.
+    Lanczos3,
+}
+
+impl BackgroundResizeFilter {
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            BackgroundResizeFilter::Nearest => "Nearest",
+            BackgroundResizeFilter::Bilinear => "Bilinear",
+            BackgroundResizeFilter::Bicubic => "Bicubic",
+            BackgroundResizeFilter::Lanczos3 => "Lanczos3",
+        }
+    }
+    pub const ALL: [BackgroundResizeFilter; 4] = [
+        BackgroundResizeFilter::Nearest,
+        BackgroundResizeFilter::Bilinear,
+        BackgroundResizeFilter::Bicubic,
+        BackgroundResizeFilter::Lanczos3,
+    ];
+}
+
+impl BackgroundLayerSpec {
+    /// Short label for the authoring UI.
+    pub fn label(&self) -> &'static str {
+        match self {
+            BackgroundLayerSpec::Solid { .. } => "Solid",
+            BackgroundLayerSpec::GradientVertical { .. } => "Gradient Vertical",
+            BackgroundLayerSpec::GradientHorizontal { .. } => "Gradient Horizontal",
+            BackgroundLayerSpec::GradientFourCorner { .. } => "Gradient Four-Corner",
+            BackgroundLayerSpec::Starfield { .. } => "Starfield",
+            BackgroundLayerSpec::Nebula { .. } => "Nebula",
+            BackgroundLayerSpec::Image { .. } => "Image",
+        }
+    }
+}
+
+/// A pre-allocated object pool (`canvas.create_pool(tag, template, count)`).
+///
+/// Encodes the engine's pooling contract so nobody has to remember it:
+/// pooled templates must be manually controlled (gravity 0.0) or parked
+/// instances accumulate momentum offscreen and fly on first spawn, and
+/// `pool_acquire` resets ONLY position + momentum — rotation/color/scale
+/// are the spawner's responsibility.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoolBlueprint {
+    /// Pool tag used by create_pool / pool_acquire / pool_release.
+    pub pool_tag: String,
+    /// Id of the (spawn_only) object blueprint used as the template.
+    pub template_object_id: String,
+    /// Number of instances pre-allocated at scene setup.
+    pub count: usize,
+}
+
+/// A `canvas.add_plugin(...)` registration emitted at the top of setup_scene.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRegistration {
+    /// Plugin type name, e.g. "TerrainCollisionPlugin".
+    pub type_name: String,
+    /// Constructor expression, e.g. "TerrainCollisionPlugin::new()" or
+    /// "SaveGamePlugin::new(\"saves\")". Emitted verbatim inside
+    /// canvas.add_plugin(...).
+    pub init_expr: String,
+}
+
+impl PluginRegistration {
+    pub fn new(type_name: impl Into<String>) -> Self {
+        let type_name = type_name.into();
+        let init_expr = format!("{type_name}::new()");
+        Self { type_name, init_expr }
+    }
+
+    /// Module import path for the four first-party Quartz plugins; custom
+    /// plugins must use a fully-qualified init_expr instead.
+    pub fn known_use_path(type_name: &str) -> Option<&'static str> {
+        match type_name {
+            "TerrainCollisionPlugin" => Some("quartz::plugin::terrain_collision::TerrainCollisionPlugin"),
+            "GrapplePlugin" => Some("quartz::plugin::grapple::GrapplePlugin"),
+            "BackgroundPlugin" => Some("quartz::plugin::background::BackgroundPlugin"),
+            "SaveGamePlugin" => Some("quartz::plugin::save_game::SaveGamePlugin"),
+            _ => None,
+        }
+    }
+
+    /// Runtime dispatch name (QuartzPlugin::name()) for the first-party
+    /// plugins — what Action::PluginCall/RunPlugin reference.
+    pub fn known_dispatch_name(type_name: &str) -> Option<&'static str> {
+        match type_name {
+            "TerrainCollisionPlugin" => Some("terrain_collision"),
+            "GrapplePlugin" => Some("grapple"),
+            "BackgroundPlugin" => Some("background"),
+            "SaveGamePlugin" => Some("save_game"),
+            _ => None,
+        }
+    }
+
+    /// Reverse lookup: dispatch name → plugin type name.
+    pub fn type_for_dispatch_name(name: &str) -> Option<&'static str> {
+        match name {
+            "terrain_collision" => Some("TerrainCollisionPlugin"),
+            "grapple" => Some("GrapplePlugin"),
+            "background" => Some("BackgroundPlugin"),
+            "save_game" => Some("SaveGamePlugin"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -81,6 +81,9 @@ pub(super) struct EditorSuggestions {
     pub variable_names: Vec<String>,
     pub constant_names: Vec<String>,
     pub expression_names: Vec<String>,
+    /// Keys of every background defined on the active scene — powers the
+    /// structured background transition/switch editor.
+    pub background_keys: Vec<String>,
 }
 
 fn collision_mask_editor(ui: &mut egui::Ui, label: &str, value: &mut u32) -> bool {
@@ -222,6 +225,11 @@ pub struct QuartzForgeApp {
     grid_size: f32,
     undock_scene_canvas: bool,
     show_camera_view_window: bool,
+    show_background_window: bool,
+    /// Cached background composite previews: key → (spec fingerprint, texture).
+    /// Re-rendered only when the background's spec actually changes, so slider
+    /// drags don't recomposite every frame.
+    background_preview_cache: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
     show_camera_view_grid: bool,
     show_pivot_points: bool,
     show_object_menu_window: bool,
@@ -311,6 +319,8 @@ impl Default for QuartzForgeApp {
             grid_size: 64.0,
             undock_scene_canvas: false,
             show_camera_view_window: true,
+            show_background_window: false,
+            background_preview_cache: std::collections::HashMap::new(),
             show_camera_view_grid: true,
             show_pivot_points: false,
             show_object_menu_window: true,
@@ -415,6 +425,13 @@ impl QuartzForgeApp {
             variable_names: variable_names.into_iter().collect(),
             constant_names: constant_names.into_iter().collect(),
             expression_names: expression_names.into_iter().collect(),
+            background_keys: scene
+                .background
+                .resolved_backgrounds()
+                .into_iter()
+                .map(|nb| nb.key)
+                .filter(|k| !k.trim().is_empty())
+                .collect(),
         }
     }
 
@@ -844,6 +861,429 @@ impl QuartzForgeApp {
         }
     }
 
+    /// Background authoring: edit the active scene's composited background.
+    /// Generates a full-screen `.finish()`ed background object built from a
+    /// LayeredBackground (this renders; BackgroundPlugin does not).
+    fn background_window_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::core::project::BackgroundLayerSpec as L;
+
+        // Phase 1 — snapshot what the preview needs BEFORE taking the &mut
+        // scene borrow used by the editors below (previews need &mut self for
+        // the texture cache, so the two can't overlap).
+        let preview_data = self
+            .project_state
+            .manifest
+            .scenes
+            .get(self.project_state.active_scene_index)
+            .map(|s| {
+                (
+                    s.canvas.virtual_width,
+                    s.canvas.virtual_height,
+                    s.background.enabled,
+                    s.background.resolved_backgrounds(),
+                )
+            });
+
+        // Phase 2 — live composite previews (same compositor the engine uses).
+        if let Some((vw, vh, enabled, resolved)) = preview_data {
+            if enabled && !resolved.is_empty() {
+                ui.label("Composite preview:");
+                for nb in &resolved {
+                    let key = nb.key.clone();
+                    ui.push_id(format!("bg_preview_{key}"), |ui| {
+                        ui.label(format!("\"{key}\""));
+                    });
+                    self.background_preview_ui(ui, &key, nb, vw, vh);
+                }
+                ui.small("Preview renders at reduced resolution — procedural layers differ in exact pixel placement from the final build.");
+                ui.separator();
+            }
+        }
+
+        // Phase 3 — editors.
+        let Some(scene) = self
+            .project_state
+            .manifest
+            .scenes
+            .get_mut(self.project_state.active_scene_index)
+        else {
+            ui.label("No active scene.");
+            return;
+        };
+        let bg = &mut scene.background;
+        let mut changed = false;
+
+        changed |= ui.checkbox(&mut bg.enabled, "Enable composited background").changed();
+        ui.label("Generates a full-screen background object from stacked layers (bottom → top).");
+        ui.separator();
+
+        ui.add_enabled_ui(bg.enabled, |ui| {
+            changed |= ui
+                .checkbox(&mut bg.camera_pinned, "Pin to camera (screen-space)")
+                .changed();
+            ui.horizontal(|ui| {
+                ui.label("render layer");
+                changed |= ui.add(egui::DragValue::new(&mut bg.render_layer).range(-1000..=0)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("global tint");
+                changed |= ui.color_edit_button_srgb(&mut bg.tint).changed();
+            });
+
+            ui.separator();
+            changed |= ui
+                .checkbox(
+                    &mut bg.use_plugin_cache,
+                    "Disk-cache via BackgroundPlugin (build once, load from disk on relaunch)",
+                )
+                .changed();
+            if bg.use_plugin_cache {
+                ui.horizontal(|ui| {
+                    ui.label("cache dir");
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut bg.cache_dir).desired_width(180.0))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("primary key");
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut bg.background_key).desired_width(120.0))
+                        .changed();
+                });
+                changed |= ui
+                    .checkbox(
+                        &mut bg.per_frame_pull,
+                        "Per-frame pull (required for crossfade transitions to show)",
+                    )
+                    .changed();
+                // Active-at-setup key picker across all defined backgrounds.
+                let mut keys = vec![bg.background_key.clone()];
+                for nb in &bg.backgrounds {
+                    keys.push(nb.key.clone());
+                }
+                let current_active = bg.effective_active_key();
+                ui.horizontal(|ui| {
+                    ui.label("active at setup");
+                    egui::ComboBox::from_id_salt("bg_active_key")
+                        .selected_text(current_active.clone())
+                        .show_ui(ui, |ui| {
+                            for k in &keys {
+                                if ui.selectable_label(current_active == *k, k).clicked() {
+                                    bg.active_key = k.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+                ui.label("Composited image pulled via current_image() onto the background object.");
+                ui.label("Transitions at runtime: Action::RunPlugin { name: \"background\", data: \"transition:main,dusk,1.5\" } (or \"set:dusk\").");
+            } else {
+                ui.label("Composite is rebuilt inline every launch (no cache, no transitions).");
+            }
+
+            ui.separator();
+            let primary_label = if bg.use_plugin_cache {
+                format!("Primary background \"{}\" — layers (0 is behind):", bg.background_key)
+            } else {
+                "Layers (index 0 is behind):".to_owned()
+            };
+            ui.label(primary_label);
+            changed |= Self::background_layer_stack_ui(ui, &mut bg.layers, "primary");
+
+            // Additional named backgrounds (plugin-cache only — needed for transitions).
+            if bg.use_plugin_cache {
+                ui.separator();
+                ui.label("Additional named backgrounds (switch/crossfade targets):");
+                let mut remove_bg: Option<usize> = None;
+                for (i, nb) in bg.backgrounds.iter_mut().enumerate() {
+                    egui::CollapsingHeader::new(format!("background \"{}\"", nb.key))
+                        .id_salt(format!("named_bg_{i}"))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("key");
+                                changed |= ui
+                                    .add(egui::TextEdit::singleline(&mut nb.key).desired_width(120.0))
+                                    .changed();
+                                ui.label("tint");
+                                changed |= ui.color_edit_button_srgb(&mut nb.tint).changed();
+                                if ui.small_button("✖ remove").clicked() {
+                                    remove_bg = Some(i);
+                                }
+                            });
+                            changed |= Self::background_layer_stack_ui(ui, &mut nb.layers, &format!("named_{i}"));
+                        });
+                }
+                if let Some(i) = remove_bg {
+                    bg.backgrounds.remove(i);
+                    changed = true;
+                }
+                if ui.button("Add named background").clicked() {
+                    let n = bg.backgrounds.len() + 1;
+                    bg.backgrounds.push(crate::core::project::NamedBackground {
+                        key: format!("bg_{n}"),
+                        tint: [255, 255, 255],
+                        layers: vec![L::Solid { color: [12, 16, 32] }],
+                    });
+                    changed = true;
+                }
+            }
+        });
+
+        if changed {
+            self.project_state.dirty = true;
+        }
+    }
+
+    /// Render (or reuse a cached) composite preview for a named background and
+    /// show it. The composite is produced by the ported engine compositor, so
+    /// what you see here is what `LayeredBackground::build()` produces —
+    /// re-rendered only when the spec fingerprint changes.
+    fn background_preview_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        cache_key: &str,
+        bg: &crate::core::project::NamedBackground,
+        virtual_w: f32,
+        virtual_h: f32,
+    ) {
+        use std::hash::{Hash, Hasher};
+
+        // Fingerprint the spec (serde form is stable and covers every field).
+        let fingerprint = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(bg).unwrap_or_default().hash(&mut h);
+            virtual_w.to_bits().hash(&mut h);
+            virtual_h.to_bits().hash(&mut h);
+            h.finish()
+        };
+
+        let needs_render = self
+            .background_preview_cache
+            .get(cache_key)
+            .map(|(fp, _)| *fp != fingerprint)
+            .unwrap_or(true);
+
+        if needs_render {
+            let (pw, ph) = crate::services::background_preview::preview_size(virtual_w, virtual_h, 320);
+            let img = crate::services::background_preview::render_background(
+                bg,
+                pw,
+                ph,
+                self.project_root.as_deref(),
+            );
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize],
+                img.as_raw(),
+            );
+            let texture = ui.ctx().load_texture(
+                format!("bg_preview_{cache_key}"),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.background_preview_cache
+                .insert(cache_key.to_owned(), (fingerprint, texture));
+        }
+
+        if let Some((_, texture)) = self.background_preview_cache.get(cache_key) {
+            let avail = ui.available_width().min(320.0);
+            let aspect = if virtual_h > 0.0 { virtual_w / virtual_h } else { 16.0 / 9.0 };
+            let size = egui::vec2(avail, (avail / aspect.max(0.05)).max(24.0));
+            ui.add(egui::Image::new(texture).fit_to_exact_size(size));
+        }
+        if bg.layers.is_empty() {
+            ui.label("(no layers — add one below)");
+        }
+    }
+
+    /// Reusable layer-stack editor (list + reorder/remove + add buttons).
+    /// `salt` disambiguates widget ids across multiple stacks in one window.
+    fn background_layer_stack_ui(
+        ui: &mut egui::Ui,
+        layers: &mut Vec<crate::core::project::BackgroundLayerSpec>,
+        salt: &str,
+    ) -> bool {
+        use crate::core::project::BackgroundLayerSpec as L;
+        let mut changed = false;
+        let mut remove: Option<usize> = None;
+        let mut move_up: Option<usize> = None;
+        for (idx, layer) in layers.iter_mut().enumerate() {
+            ui.push_id(format!("{salt}_layer_{idx}"), |ui| {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{idx}: {}", layer.label()));
+                        if idx > 0 && ui.small_button("▲").clicked() {
+                            move_up = Some(idx);
+                        }
+                        if ui.small_button("✖").clicked() {
+                            remove = Some(idx);
+                        }
+                    });
+                    changed |= Self::background_layer_fields(ui, layer);
+                });
+            });
+        }
+        if let Some(i) = remove {
+            layers.remove(i);
+            changed = true;
+        }
+        if let Some(i) = move_up {
+            layers.swap(i - 1, i);
+            changed = true;
+        }
+        ui.push_id(format!("{salt}_add"), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("+ Solid").clicked() {
+                    layers.push(L::Solid { color: [12, 16, 32] });
+                    changed = true;
+                }
+                if ui.button("+ Gradient V").clicked() {
+                    layers.push(L::GradientVertical { top: [8, 26, 74], bottom: [2, 4, 16] });
+                    changed = true;
+                }
+                if ui.button("+ Gradient H").clicked() {
+                    layers.push(L::GradientHorizontal { left: [8, 26, 74], right: [2, 4, 16] });
+                    changed = true;
+                }
+                if ui.button("+ Four-Corner").clicked() {
+                    layers.push(L::GradientFourCorner {
+                        top_left: [8, 26, 74],
+                        top_right: [20, 10, 60],
+                        bottom_left: [2, 4, 16],
+                        bottom_right: [4, 2, 20],
+                    });
+                    changed = true;
+                }
+                if ui.button("+ Starfield").clicked() {
+                    layers.push(L::Starfield {
+                        density: 300,
+                        seed: 0xCAFE_BABE,
+                        size_min: 0,
+                        size_max: 1,
+                        brightness_min: 100,
+                        brightness_max: 255,
+                        vertical_fade: Some(200),
+                    });
+                    changed = true;
+                }
+                if ui.button("+ Nebula").clicked() {
+                    layers.push(L::Nebula { color: [80, 40, 120], density: 0.4, seed: 0x1234 });
+                    changed = true;
+                }
+                if ui.button("+ Image").clicked() {
+                    layers.push(L::Image {
+                        asset_path: "assets/background.png".to_owned(),
+                        filter: crate::core::project::BackgroundResizeFilter::Bilinear,
+                    });
+                    changed = true;
+                }
+            });
+        });
+        changed
+    }
+
+    /// Per-layer field editor for the background window. Returns true if edited.
+    fn background_layer_fields(ui: &mut egui::Ui, layer: &mut crate::core::project::BackgroundLayerSpec) -> bool {
+        use crate::core::project::BackgroundLayerSpec as L;
+        let mut changed = false;
+        match layer {
+            L::Solid { color } => {
+                ui.horizontal(|ui| {
+                    ui.label("color");
+                    changed |= ui.color_edit_button_srgb(color).changed();
+                });
+            }
+            L::GradientVertical { top, bottom } => {
+                ui.horizontal(|ui| {
+                    ui.label("top");
+                    changed |= ui.color_edit_button_srgb(top).changed();
+                    ui.label("bottom");
+                    changed |= ui.color_edit_button_srgb(bottom).changed();
+                });
+            }
+            L::GradientHorizontal { left, right } => {
+                ui.horizontal(|ui| {
+                    ui.label("left");
+                    changed |= ui.color_edit_button_srgb(left).changed();
+                    ui.label("right");
+                    changed |= ui.color_edit_button_srgb(right).changed();
+                });
+            }
+            L::GradientFourCorner { top_left, top_right, bottom_left, bottom_right } => {
+                ui.horizontal(|ui| {
+                    ui.label("TL");
+                    changed |= ui.color_edit_button_srgb(top_left).changed();
+                    ui.label("TR");
+                    changed |= ui.color_edit_button_srgb(top_right).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("BL");
+                    changed |= ui.color_edit_button_srgb(bottom_left).changed();
+                    ui.label("BR");
+                    changed |= ui.color_edit_button_srgb(bottom_right).changed();
+                });
+            }
+            L::Starfield { density, size_min, size_max, brightness_min, brightness_max, vertical_fade, .. } => {
+                changed |= ui.add(egui::Slider::new(density, 0..=2000).text("density")).changed();
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(size_min).range(0..=32).prefix("size min ")).changed();
+                    changed |= ui.add(egui::DragValue::new(size_max).range(0..=32).prefix("size max ")).changed();
+                });
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(brightness_min).prefix("bright min ")).changed();
+                    changed |= ui.add(egui::DragValue::new(brightness_max).prefix("bright max ")).changed();
+                });
+                let mut fade_on = vertical_fade.is_some();
+                if ui.checkbox(&mut fade_on, "vertical fade").changed() {
+                    *vertical_fade = if fade_on { Some(200) } else { None };
+                    changed = true;
+                }
+                if let Some(fade) = vertical_fade.as_mut() {
+                    changed |= ui.add(egui::Slider::new(fade, 0..=2000).text("fade px")).changed();
+                }
+            }
+            L::Nebula { color, density, seed: _ } => {
+                ui.horizontal(|ui| {
+                    ui.label("color");
+                    changed |= ui.color_edit_button_srgb(color).changed();
+                });
+                changed |= ui.add(egui::Slider::new(density, 0.0..=1.0).text("density")).changed();
+            }
+            L::Image { asset_path, filter } => {
+                use crate::core::project::BackgroundResizeFilter as F;
+                ui.horizontal(|ui| {
+                    ui.label("asset");
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(asset_path)
+                                .hint_text("assets/sky.png")
+                                .desired_width(200.0),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("resize filter");
+                    egui::ComboBox::from_id_salt("bg_layer_filter")
+                        .selected_text(filter.variant_name())
+                        .show_ui(ui, |ui| {
+                            for f in F::ALL {
+                                if ui.selectable_label(*filter == f, f.variant_name()).clicked() {
+                                    *filter = f;
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+                ui.small(match filter {
+                    F::Nearest => "Nearest — crisp pixels, best for pixel art.",
+                    F::Bilinear => "Bilinear — fast and soft.",
+                    F::Bicubic => "Bicubic — smoother and sharper than bilinear.",
+                    F::Lanczos3 => "Lanczos3 — highest quality, slowest.",
+                });
+            }
+        }
+        changed
+    }
+
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Inspector");
         ui.add_space(6.0);
@@ -859,6 +1299,8 @@ impl QuartzForgeApp {
             ui.label("No active scene.");
             return;
         };
+        let mut inspector_dirty = false;
+        let mut open_background_window = false;
 
         ui.label("Scene Name");
         let name_changed = ui.text_edit_singleline(&mut scene.name).changed();
@@ -1034,10 +1476,231 @@ impl QuartzForgeApp {
         ui.label(format!("roundtrip: ({sx2:.2}, {sy2:.2})"));
 
         ui.separator();
+        // ── Required plugins ─────────────────────────────────────────────────
+        // Plugins do NOT auto-register: PluginCall/RunPlugin against an
+        // unregistered plugin compiles and silently no-ops at runtime.
+        egui::CollapsingHeader::new("Required Plugins")
+            .id_salt("inspector_required_plugins")
+            .show(ui, |ui| {
+                let mut plugins_changed = false;
+                for type_name in [
+                    "TerrainCollisionPlugin",
+                    "GrapplePlugin",
+                    "BackgroundPlugin",
+                    "SaveGamePlugin",
+                ] {
+                    let mut enabled = scene
+                        .required_plugins
+                        .iter()
+                        .any(|reg| reg.type_name == type_name);
+                    let dispatch = crate::core::project::PluginRegistration::known_dispatch_name(type_name)
+                        .unwrap_or("?");
+                    if ui
+                        .checkbox(&mut enabled, format!("{type_name}  (dispatch: \"{dispatch}\")"))
+                        .changed()
+                    {
+                        if enabled {
+                            scene
+                                .required_plugins
+                                .push(crate::core::project::PluginRegistration::new(type_name));
+                        } else {
+                            scene.required_plugins.retain(|reg| reg.type_name != type_name);
+                        }
+                        plugins_changed = true;
+                    }
+                }
+                // Custom registrations (non-first-party) get raw init editing.
+                let mut remove_index: Option<usize> = None;
+                for (idx, reg) in scene.required_plugins.iter_mut().enumerate() {
+                    if crate::core::project::PluginRegistration::known_use_path(&reg.type_name).is_some() {
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("custom:");
+                        plugins_changed |= ui.text_edit_singleline(&mut reg.init_expr).changed();
+                        if ui.button("✖").on_hover_text("remove registration").clicked() {
+                            remove_index = Some(idx);
+                        }
+                    });
+                }
+                if let Some(idx) = remove_index {
+                    scene.required_plugins.remove(idx);
+                    plugins_changed = true;
+                }
+                if ui.button("Add custom plugin registration").clicked() {
+                    scene.required_plugins.push(crate::core::project::PluginRegistration {
+                        type_name: "MyPlugin".to_owned(),
+                        init_expr: "my_crate::MyPlugin::new()".to_owned(),
+                    });
+                    plugins_changed = true;
+                }
+                if plugins_changed {
+                    inspector_dirty = true;
+                }
+            });
+
+        ui.separator();
+        // ── Object pools ─────────────────────────────────────────────────────
+        egui::CollapsingHeader::new("Object Pools")
+            .id_salt("inspector_object_pools")
+            .show(ui, |ui| {
+                ui.label("create_pool runs at the end of setup_scene. Templates must be spawn-only objects.");
+                let template_ids: Vec<(String, bool, f32)> = scene
+                    .objects
+                    .iter()
+                    .map(|o| (o.id.clone(), o.spawn_only, o.advanced.gravity))
+                    .collect();
+                let mut pools_changed = false;
+                let mut remove_index: Option<usize> = None;
+                for (idx, pool) in scene.pools.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label("tag");
+                        pools_changed |= ui
+                            .add(egui::TextEdit::singleline(&mut pool.pool_tag).desired_width(90.0))
+                            .changed();
+                        ui.label("template");
+                        egui::ComboBox::from_id_salt(format!("pool_template_{idx}"))
+                            .selected_text(pool.template_object_id.clone())
+                            .show_ui(ui, |ui| {
+                                for (id, _, _) in &template_ids {
+                                    if ui
+                                        .selectable_label(pool.template_object_id == *id, id)
+                                        .clicked()
+                                    {
+                                        pool.template_object_id = id.clone();
+                                        pools_changed = true;
+                                    }
+                                }
+                            });
+                        let mut count = pool.count as u32;
+                        if ui
+                            .add(egui::DragValue::new(&mut count).range(1..=4096).prefix("count "))
+                            .changed()
+                        {
+                            pool.count = count as usize;
+                            pools_changed = true;
+                        }
+                        if ui.button("✖").on_hover_text("remove pool").clicked() {
+                            remove_index = Some(idx);
+                        }
+                    });
+                    // Encode the pool traps as inline warnings, not tribal memory.
+                    match template_ids.iter().find(|(id, _, _)| id == &pool.template_object_id) {
+                        None => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(220, 70, 70),
+                                "template object not found in this scene",
+                            );
+                        }
+                        Some((_, spawn_only, gravity)) => {
+                            if !spawn_only {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(220, 70, 70),
+                                    "template must be spawn-only (enable it in the Object Builder)",
+                                );
+                            }
+                            if *gravity != 0.0 {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(220, 170, 70),
+                                    "template gravity is non-zero — parked pool instances accumulate momentum and fly on first spawn",
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Some(idx) = remove_index {
+                    scene.pools.remove(idx);
+                    pools_changed = true;
+                }
+                if ui.button("Add pool").clicked() {
+                    let template = template_ids
+                        .iter()
+                        .find(|(_, spawn_only, _)| *spawn_only)
+                        .map(|(id, _, _)| id.clone())
+                        .unwrap_or_default();
+                    scene.pools.push(crate::core::project::PoolBlueprint {
+                        pool_tag: format!("pool_{}", scene.pools.len()),
+                        template_object_id: template,
+                        count: 32,
+                    });
+                    pools_changed = true;
+                }
+                ui.label("pool_acquire resets ONLY position + momentum — reset rotation/color/scale in your spawner.");
+                if pools_changed {
+                    inspector_dirty = true;
+                }
+            });
+
+        ui.separator();
+        // ── Camera authoring ─────────────────────────────────────────────────
+        egui::CollapsingHeader::new("Camera")
+            .id_salt("inspector_camera")
+            .show(ui, |ui| {
+                let cam = &mut scene.camera;
+                let mut cam_changed = false;
+                cam_changed |= ui
+                    .checkbox(&mut cam.follow_enabled, "Follow a target")
+                    .changed();
+                if cam.follow_enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("follow target");
+                        let (kind, mut value) = match &cam.follow_target {
+                            crate::core::quartz_domain::QuartzTargetRef::Name(s) => ("name", s.clone()),
+                            crate::core::quartz_domain::QuartzTargetRef::Id(s) => ("id", s.clone()),
+                            crate::core::quartz_domain::QuartzTargetRef::Tag(s) => ("tag", s.clone()),
+                        };
+                        if ui.add(egui::TextEdit::singleline(&mut value).desired_width(140.0)).changed() {
+                            cam.follow_target = match kind {
+                                "id" => crate::core::quartz_domain::QuartzTargetRef::Id(value),
+                                "tag" => crate::core::quartz_domain::QuartzTargetRef::Tag(value),
+                                _ => crate::core::quartz_domain::QuartzTargetRef::Name(value),
+                            };
+                            cam_changed = true;
+                        }
+                    });
+                }
+                cam_changed |= ui
+                    .add(egui::Slider::new(&mut cam.initial_zoom, 0.1..=8.0).text("initial zoom"))
+                    .changed();
+                if (cam.initial_zoom - 1.0).abs() > f32::EPSILON {
+                    cam_changed |= ui
+                        .checkbox(&mut cam.smooth_initial_zoom, "smooth zoom in at start (else snap)")
+                        .changed();
+                }
+                ui.label("Emitted at setup via canvas.camera_mut(): follow + snap/smooth zoom.");
+                if cam_changed {
+                    inspector_dirty = true;
+                }
+            });
+
+        ui.separator();
+        // ── Background ───────────────────────────────────────────────────────
+        egui::CollapsingHeader::new("Background")
+            .id_salt("inspector_background")
+            .show(ui, |ui| {
+                let enabled = scene.background.enabled;
+                ui.label(if enabled {
+                    format!("{} layer(s). Edit in the Background Authoring window.", scene.background.layers.len())
+                } else {
+                    "No composited background.".to_owned()
+                });
+                if ui.button("Open Background Authoring window").clicked() {
+                    open_background_window = true;
+                }
+            });
+
+        ui.separator();
         ui.label("Quartz Forge Contract");
         ui.label("- Scene entry files live in /src/scenes and component scripts can live in /src/scripts");
         ui.label("- Asset roots live in /assets/*");
         ui.label("- Preview runner targets the project root crate");
+
+        if inspector_dirty {
+            self.project_state.dirty = true;
+        }
+        if open_background_window {
+            self.show_background_window = true;
+        }
     }
 
     fn center_panel(&mut self, ui: &mut egui::Ui) {
@@ -1047,6 +1710,7 @@ impl QuartzForgeApp {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.undock_scene_canvas, "undock scene canvas window");
             ui.checkbox(&mut self.show_camera_view_window, "show camera view window");
+            ui.checkbox(&mut self.show_background_window, "background authoring window");
             ui.checkbox(&mut self.show_pivot_points, "show pivot points");
             ui.checkbox(&mut self.show_spawn_overlay, "show spawn overlay");
         });
@@ -1152,6 +1816,18 @@ impl QuartzForgeApp {
                 .show(ctx, |ui| {
                     self.camera_view_panel(ui);
                 });
+        }
+
+        if self.show_background_window {
+            let mut open = self.show_background_window;
+            egui::Window::new("Background Authoring")
+                .resizable(true)
+                .default_size(egui::vec2(420.0, 520.0))
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    self.background_window_panel(ui);
+                });
+            self.show_background_window = open;
         }
 
         let object_menu_window_id = egui::Id::new("object_menu_window");
@@ -1833,7 +2509,15 @@ impl QuartzForgeApp {
                         drag_mode = CanvasDragMode::ResizeBottomRight;
                         break;
                     }
-                    if !obj.lock_transform && obj_rect.contains(pointer) {
+                    if !obj.lock_transform
+                        && Self::object_body_hit(
+                            obj_rect,
+                            obj.advanced.rotation_deg,
+                            obj.advanced.pivot_x,
+                            obj.advanced.pivot_y,
+                            pointer,
+                        )
+                    {
                         hit_index = Some(idx);
                         drag_mode = CanvasDragMode::Move;
                         break;
@@ -2162,7 +2846,13 @@ impl QuartzForgeApp {
                         view_rect.top() + (rel_y + obj.h) * scale,
                     );
                     let obj_rect = Rect::from_two_pos(p0, p1);
-                    if obj_rect.contains(pointer) {
+                    if Self::object_body_hit(
+                        obj_rect,
+                        obj.advanced.rotation_deg,
+                        obj.advanced.pivot_x,
+                        obj.advanced.pivot_y,
+                        pointer,
+                    ) {
                         hit_index = Some(idx);
                         break;
                     }
@@ -2240,6 +2930,49 @@ impl QuartzForgeApp {
         } else {
             object.advanced.rotation_deg
         }
+    }
+
+    /// Convex-quad containment via cross-product sign consistency.
+    fn point_in_quad(point: Pos2, quad: &[Pos2; 4]) -> bool {
+        let mut sign = 0i8;
+        for i in 0..4 {
+            let a = quad[i];
+            let b = quad[(i + 1) % 4];
+            let cross = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
+            if cross.abs() < f32::EPSILON {
+                continue;
+            }
+            let s: i8 = if cross > 0.0 { 1 } else { -1 };
+            if sign == 0 {
+                sign = s;
+            } else if sign != s {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Body hit test that respects the object's visual rotation — selection
+    /// now matches what is drawn instead of the axis-aligned bounding rect.
+    fn object_body_hit(
+        obj_rect: Rect,
+        rotation_deg: f32,
+        pivot_x: f32,
+        pivot_y: f32,
+        pointer: Pos2,
+    ) -> bool {
+        if rotation_deg.abs() < 0.01 {
+            return obj_rect.contains(pointer);
+        }
+        let quad = Self::rotated_rect_points(
+            obj_rect.left_top(),
+            obj_rect.width(),
+            obj_rect.height(),
+            pivot_x,
+            pivot_y,
+            rotation_deg,
+        );
+        Self::point_in_quad(pointer, &quad)
     }
 
     fn rotated_rect_points(
@@ -5967,6 +6700,98 @@ impl QuartzForgeApp {
 #[cfg(test)]
 mod tests {
     use super::QuartzForgeApp;
+
+    /// Headless UI smoke test: drive the authoring panels through a windowless
+    /// egui::Context (no eframe, no wgpu, no display). Exercises the actual
+    /// widget code paths for the inspector (camera + background + pools +
+    /// plugins sections) and the background authoring window across several
+    /// frames. A panic here means a UI code path is broken; passing means the
+    /// panels render and mutate state without crashing in any environment
+    /// (including CI). Pairs with the codegen engine-build gate: this proves
+    /// the UI runs, that proves what it produces compiles.
+    #[test]
+    fn headless_ui_authoring_panels_render_without_panic() {
+        use crate::core::project::BackgroundLayerSpec as L;
+
+        let ctx = egui::Context::default();
+        let mut app = QuartzForgeApp::default();
+
+        // Populate the active scene so every widget branch is exercised:
+        // camera follow + zoom, and one of every background layer variant.
+        {
+            let scene = &mut app.project_state.manifest.scenes[0];
+            scene.camera.follow_enabled = true;
+            scene.camera.initial_zoom = 1.5;
+            scene.camera.smooth_initial_zoom = true;
+            scene.background.enabled = true;
+            scene.background.use_plugin_cache = true;
+            scene.background.per_frame_pull = true;
+            scene.background.active_key = "main".to_owned();
+            scene.background.backgrounds = vec![crate::core::project::NamedBackground {
+                key: "dusk".to_owned(),
+                tint: [200, 120, 80],
+                layers: vec![L::Solid { color: [20, 10, 30] }],
+            }];
+            scene.background.layers = vec![
+                L::Solid { color: [12, 16, 32] },
+                L::GradientVertical { top: [8, 26, 74], bottom: [2, 4, 16] },
+                L::GradientHorizontal { left: [8, 26, 74], right: [2, 4, 16] },
+                L::GradientFourCorner {
+                    top_left: [8, 26, 74],
+                    top_right: [20, 10, 60],
+                    bottom_left: [2, 4, 16],
+                    bottom_right: [4, 2, 20],
+                },
+                L::Starfield {
+                    density: 300,
+                    seed: 0xCAFE_BABE,
+                    size_min: 0,
+                    size_max: 1,
+                    brightness_min: 100,
+                    brightness_max: 255,
+                    vertical_fade: Some(200),
+                },
+                L::Nebula { color: [80, 40, 120], density: 0.4, seed: 0x1234 },
+            ];
+        }
+        app.show_background_window = true;
+
+        // Give the scene an event carrying a background-transition action so the
+        // event builder's structured background editor is exercised too.
+        {
+            let scene = &mut app.project_state.manifest.scenes[0];
+            let mut evt = crate::core::quartz_domain::QuartzEventBinding::new(
+                "evt_bg".to_owned(),
+                "bg_transition".to_owned(),
+                crate::core::quartz_domain::QuartzTargetRef::Name("player".to_owned()),
+            );
+            evt.action = Some(crate::core::quartz_domain::QuartzAction::RunPlugin {
+                name: "background".to_owned(),
+                data: "transition:main,dusk,1.5".to_owned(),
+            });
+            scene.events.push(evt);
+        }
+
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.inspector_panel(ui);
+                });
+                egui::Window::new("bg_test").show(ctx, |ui| {
+                    app.background_window_panel(ui);
+                });
+                egui::Window::new("events_test").show(ctx, |ui| {
+                    app.events_editor(ui);
+                });
+            });
+        }
+
+        // Sanity: the panels did not clear the authored state.
+        let scene = &app.project_state.manifest.scenes[0];
+        assert!(scene.background.enabled);
+        assert_eq!(scene.background.layers.len(), 6);
+        assert!(scene.camera.follow_enabled);
+    }
 
     #[test]
     fn component_module_path_attr_steps_out_of_scene_directory() {

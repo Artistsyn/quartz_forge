@@ -422,6 +422,11 @@ pub struct ObjectAdvancedParams {
     pub screen_pin_offset_y: f32,
     pub ignore_zoom: bool,
     pub screen_space: bool,
+    /// Exclude this object from scene lighting (`GameObjectBuilder::unlit()`).
+    /// Required for very large objects (30000+ width backgrounds) where
+    /// center-sampled tinting makes per-position lighting useless.
+    #[serde(default)]
+    pub unlit: bool,
 }
 
 impl Default for ObjectAdvancedParams {
@@ -486,6 +491,7 @@ impl Default for ObjectAdvancedParams {
             screen_pin_offset_x: 0.0,
             screen_pin_offset_y: 0.0,
             ignore_zoom: false,
+            unlit: false,
             screen_space: false,
         }
     }
@@ -2009,7 +2015,7 @@ impl CompareOp {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuartzTargetRef {
     Name(String),
     Tag(String),

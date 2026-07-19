@@ -62,12 +62,128 @@ impl QuartzForgeApp {
         changed
     }
 
+    /// Structured editor for BackgroundPlugin's `data` protocol:
+    ///   `"set:<key>"`                      — instant switch
+    ///   `"transition:<from>,<to>,<secs>"`  — crossfade
+    /// Falls back to a raw text field for anything else. Keys come from the
+    /// scene's defined backgrounds so they can't be mistyped.
+    fn background_plugin_data_editor(
+        ui: &mut egui::Ui,
+        data: &mut String,
+        suggestions: &EditorSuggestions,
+    ) -> bool {
+        let mut changed = false;
+        let keys = &suggestions.background_keys;
+        let fallback = keys.first().cloned().unwrap_or_else(|| "main".to_owned());
+
+        let trimmed = data.trim().to_owned();
+        let mut mode = if trimmed.starts_with("transition:") {
+            "transition"
+        } else if trimmed.starts_with("set:") {
+            "set"
+        } else {
+            "raw"
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("background action");
+            if ui.selectable_label(mode == "transition", "crossfade").clicked() && mode != "transition" {
+                let to = keys.get(1).cloned().unwrap_or_else(|| fallback.clone());
+                *data = format!("transition:{},{},1", fallback, to);
+                mode = "transition";
+                changed = true;
+            }
+            if ui.selectable_label(mode == "set", "instant switch").clicked() && mode != "set" {
+                *data = format!("set:{fallback}");
+                mode = "set";
+                changed = true;
+            }
+            if ui.selectable_label(mode == "raw", "raw").clicked() && mode != "raw" {
+                mode = "raw";
+            }
+        });
+
+        fn key_combo(
+            ui: &mut egui::Ui,
+            id: &str,
+            current: &mut String,
+            keys: &[String],
+        ) -> bool {
+            let mut picked = false;
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(current.clone())
+                .show_ui(ui, |ui| {
+                    for k in keys {
+                        if ui.selectable_label(&*current == k, k).clicked() {
+                            *current = k.clone();
+                            picked = true;
+                        }
+                    }
+                });
+            picked
+        }
+
+        match mode {
+            "transition" => {
+                let body = trimmed.trim_start_matches("transition:").to_owned();
+                let parts: Vec<String> = body.splitn(3, ',').map(|s| s.trim().to_owned()).collect();
+                let mut from = parts.first().cloned().unwrap_or_else(|| fallback.clone());
+                let mut to = parts.get(1).cloned().unwrap_or_else(|| fallback.clone());
+                let mut secs = parts.get(2).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0);
+                let mut edited = false;
+                ui.horizontal(|ui| {
+                    ui.label("from");
+                    edited |= key_combo(ui, "bg_tr_from", &mut from, keys);
+                    ui.label("to");
+                    edited |= key_combo(ui, "bg_tr_to", &mut to, keys);
+                });
+                edited |= ui
+                    .add(egui::Slider::new(&mut secs, 0.05..=10.0).text("seconds"))
+                    .changed();
+                if edited {
+                    *data = format!("transition:{from},{to},{secs}");
+                    changed = true;
+                }
+                ui.label("Needs per-frame pull enabled on the background, else only the final frame shows.");
+            }
+            "set" => {
+                let mut key = trimmed.trim_start_matches("set:").trim().to_owned();
+                if key.is_empty() {
+                    key = fallback.clone();
+                }
+                ui.horizontal(|ui| {
+                    ui.label("show background");
+                    if key_combo(ui, "bg_set_key", &mut key, keys) {
+                        *data = format!("set:{key}");
+                        changed = true;
+                    }
+                });
+            }
+            _ => {
+                ui.label("plugin data payload");
+                changed |= ui.text_edit_singleline(data).changed();
+                ui.label("Formats:  set:<key>   |   transition:<from>,<to>,<seconds>");
+            }
+        }
+
+        if keys.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 170, 70),
+                "No backgrounds defined — add them in the Background Authoring window.",
+            );
+        }
+        changed
+    }
+
     fn edit_action_scoped(
         ui: &mut egui::Ui,
         action: &mut QuartzAction,
         suggestions: &EditorSuggestions,
     ) -> bool {
         let mut changed = false;
+        // Blob rescue: staged here because the match arms hold borrows into
+        // `action` — the swap is applied after the match ends.
+        let mut replace_action: Option<QuartzAction> = None;
 
         let mut action_kind = match action {
             QuartzAction::Teleport { .. } => "Teleport",
@@ -955,12 +1071,38 @@ impl QuartzForgeApp {
             QuartzAction::RunPlugin { name, data } => {
                 ui.label("plugin name");
                 changed |= ui.text_edit_singleline(name).changed();
-                ui.label("plugin data payload");
-                changed |= ui.text_edit_singleline(data).changed();
+                // Structured editor for the background plugin's data protocol
+                // ("set:key" | "transition:from,to,duration") — otherwise the
+                // user has to hand-type a stringly-typed payload.
+                if name.trim() == "background" {
+                    changed |= Self::background_plugin_data_editor(ui, data, suggestions);
+                } else {
+                    ui.label("plugin data payload");
+                    changed |= ui.text_edit_singleline(data).changed();
+                }
             }
             QuartzAction::Expr { raw } => {
-                ui.label("action expr source");
+                ui.label("action expr source (raw code — not visually editable)");
                 changed |= ui.text_edit_singleline(raw).changed();
+                // Blob rescue: re-run the semantic import parser on the raw
+                // text. If it now parses into a structured variant (e.g. the
+                // parser gained coverage, or the user fixed a typo), swap the
+                // blob for the structured action and unlock visual editing.
+                if ui
+                    .button("Convert to structured")
+                    .on_hover_text(
+                        "Parse this raw code with the semantic importer. If it matches a \
+                         known Action shape, it becomes fully editable in the UI.",
+                    )
+                    .clicked()
+                {
+                    if let Ok(expr) = syn::parse_str::<syn::Expr>(raw.as_str()) {
+                        let parsed = crate::services::project_import::parse_action_expr_public(&expr);
+                        if !matches!(parsed, QuartzAction::Expr { .. }) {
+                            replace_action = Some(parsed);
+                        }
+                    }
+                }
             }
             QuartzAction::Custom { name } => {
                 ui.label("custom action name");
@@ -1501,6 +1643,11 @@ impl QuartzForgeApp {
                     color_rgb[2] = b as u8; changed = true;
                 }
             }
+        }
+
+        if let Some(parsed) = replace_action {
+            *action = parsed;
+            changed = true;
         }
 
         if let Err(message) = Self::validate_physics_action_ranges(action) {

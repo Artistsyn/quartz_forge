@@ -162,6 +162,7 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
 
     let mut out = String::new();
     out.push_str("use quartz::prelude::*;\n");
+    out.push_str(&codegen::scene_extra_use_lines(scene));
     for (target, module_name) in &external_modules {
         let module_path = component_module_path_attr(scene_source_file, target);
         out.push_str(&format!("#[path = \"{}\"]\nmod {};\n", module_path, module_name));
@@ -198,6 +199,8 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     }
 
     out.push_str("pub fn setup_scene(canvas: &mut Canvas) {\n");
+    // Plugin registrations FIRST — dispatch to an unregistered plugin no-ops.
+    out.push_str(&codegen::scene_plugin_register_lines(scene));
     out.push_str(&codegen::scene_setup_physics_lines(scene));
 
     // Phase 1: build all local objects (does NOT call canvas.add_game_object yet so that
@@ -241,6 +244,11 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
         out.push_str(&codegen::object_add_line(object));
     }
 
+    // Phase 4: pools, camera, background — after objects/templates exist.
+    out.push_str(&codegen::scene_pool_lines(scene));
+    out.push_str(&codegen::scene_camera_lines(scene));
+    out.push_str(&codegen::scene_background_lines(scene));
+
     out.push_str("}\n\n");
 
     out.push_str("pub fn register_logic(canvas: &mut Canvas) {\n");
@@ -272,6 +280,9 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
             ));
         }
     }
+    // Per-frame background pull (plugin-cache + per_frame_pull) — keeps
+    // crossfade transitions blending on screen.
+    out.push_str(&codegen::scene_background_update_lines(scene));
     out.push_str("}\n\n");
 
     out.push_str("pub fn register_events(canvas: &mut Canvas) {\n");
