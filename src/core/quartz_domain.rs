@@ -189,6 +189,21 @@ pub struct QuartzObjectBlueprint {
     pub is_background: bool,
     #[serde(default)]
     pub spawn_only: bool,
+    /// SYNFUL-ONLY: exclude this object from lighting entirely.
+    ///
+    /// `unlit` is a public FIELD on `GameObject` (`obj.unlit = true;`) — there
+    /// is no `.unlit()` builder method, so this emits as a field assignment
+    /// after the object local is built.
+    ///
+    /// Large objects (backgrounds, wide terrain) are tinted uniformly from
+    /// their center, so per-position lighting on them looks wrong — mark those
+    /// unlit.
+    #[serde(default)]
+    pub unlit: bool,
+    /// SYNFUL-ONLY: this object occludes light and casts shadows.
+    /// Emits the `.casts_shadow()` builder method.
+    #[serde(default)]
+    pub casts_shadow: bool,
     pub advanced: ObjectAdvancedParams,
     pub visible: ObjectParamVisibility,
 }
@@ -217,6 +232,8 @@ impl QuartzObjectBlueprint {
             lock_transform: false,
             is_background: false,
             spawn_only: false,
+            unlit: false,
+            casts_shadow: false,
             advanced: ObjectAdvancedParams::default(),
             visible: ObjectParamVisibility::default(),
         }

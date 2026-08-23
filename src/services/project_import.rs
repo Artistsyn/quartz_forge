@@ -373,10 +373,24 @@ fn parse_object_followup_expr(
     if let Expr::Assign(assign) = expr {
         if let Expr::Field(field) = &*assign.left {
             if let (Some(var_name), Member::Named(member)) = (expr_ident_name(&field.base), &field.member)
-                && member == "is_platform"
                 && let Some(object) = built.get_mut(&var_name)
             {
-                object.advanced.is_platform = expr_to_bool(&assign.right).unwrap_or(false);
+                match member.to_string().as_str() {
+                    "is_platform" => {
+                        object.advanced.is_platform = expr_to_bool(&assign.right).unwrap_or(false);
+                    }
+                    // SYNFUL: per-object lighting flags emit as field
+                    // assignments (`obj.unlit = true;`, `obj.shadow_caster = true;`)
+                    // because they are public fields, not builder methods. Parse
+                    // them back onto the blueprint so they survive the roundtrip.
+                    "unlit" => {
+                        object.unlit = expr_to_bool(&assign.right).unwrap_or(false);
+                    }
+                    "shadow_caster" => {
+                        object.casts_shadow = expr_to_bool(&assign.right).unwrap_or(false);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -649,6 +663,20 @@ fn import_custom_blocks_from_ast(
             if let Some(camera) = extract_camera_spec(func) {
                 if let Some(scene) = state.manifest.scenes.get_mut(scene_index) {
                     scene.camera = camera;
+                    updated += 1;
+                }
+            }
+            // SYNFUL: real-time lighting + GPU post-fx blocks import
+            // structurally so they survive the roundtrip and stay editable.
+            if let Some(lighting) = extract_lighting_spec(func) {
+                if let Some(scene) = state.manifest.scenes.get_mut(scene_index) {
+                    scene.lighting = lighting;
+                    updated += 1;
+                }
+            }
+            if let Some(post_fx) = extract_post_fx_spec(func) {
+                if let Some(scene) = state.manifest.scenes.get_mut(scene_index) {
+                    scene.post_fx = post_fx;
                     updated += 1;
                 }
             }
@@ -4365,6 +4393,16 @@ fn path_last_ident(expr: &Expr) -> Option<String> {
     }
 }
 
+/// True if any segment of the path expression equals `ident` (e.g. the
+/// `LightSource` in `LightSource::new` or `quartz::LightSource::new`).
+fn path_contains_ident(expr: &Expr, ident: &str) -> bool {
+    match expr {
+        Expr::Path(path) => path.path.segments.iter().any(|seg| seg.ident == ident),
+        Expr::Paren(paren) => path_contains_ident(&paren.expr, ident),
+        _ => false,
+    }
+}
+
 fn remove_manual_override_for_file(state: &mut EditorProjectState, scene_index: usize, rel_path: &str) {
     if let Some(scene) = state.manifest.scenes.get_mut(scene_index) {
         let before = scene.custom_code_blocks.len();
@@ -4610,6 +4648,167 @@ mod roundtrip_fixed_point_tests {
             b.code.contains("camera_mut") || b.code.contains("LayeredBackground")
         });
         assert!(!leaked, "camera/background leaked into raw setup_runtime code");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// SYNFUL: full lighting + post-fx + per-object flags survive the
+    /// roundtrip, and none of it leaks into raw setup_runtime code. Exercises
+    /// every LightType, every LightEffect, attachment, disabled/shadowless
+    /// lights, night-mode post-fx + bloom, and object unlit/casts_shadow.
+    #[test]
+    fn synful_lighting_and_post_fx_survive_roundtrip() {
+        use crate::core::project::{
+            LightEffectSpec, LightKindSpec, LightSpec, LightingSpec, PostFxMode, PostFxSpec,
+        };
+        use crate::core::quartz_domain::QuartzObjectBlueprint;
+        use crate::services::project_sync::build_scene_source;
+
+        let root = temp_root("synful_lighting");
+        std::fs::create_dir_all(root.join("src/scenes")).unwrap();
+        let rel = "src/scenes/main_scene.rs";
+
+        let mut state = EditorProjectState::new("synlt".to_owned());
+        state.manifest.scenes[0].source_file = rel.to_owned();
+        {
+            let scene = &mut state.manifest.scenes[0];
+
+            // An object carrying both lighting flags — must round-trip onto the
+            // blueprint, not degrade into raw setup_runtime code.
+            let mut ground = QuartzObjectBlueprint::new("ground".to_owned(), "ground".to_owned());
+            ground.x = 0.0;
+            ground.y = 800.0;
+            ground.w = 3840.0;
+            ground.h = 160.0;
+            ground.unlit = true;
+            ground.casts_shadow = true;
+            scene.objects.push(ground);
+
+            scene.lighting = LightingSpec {
+                enabled: true,
+                ambient_color: [10, 10, 25, 255],
+                ambient_strength: 0.06,
+                max_lights: 48,
+                lights: vec![
+                    LightSpec {
+                        id: "torch".to_owned(),
+                        kind: LightKindSpec::Point,
+                        x: 400.0,
+                        y: 300.0,
+                        color: [255, 180, 80, 255],
+                        radius: 300.0,
+                        intensity: 0.8,
+                        enabled: true,
+                        casts_shadows: true,
+                        effect: LightEffectSpec::Flicker { base_intensity: 0.8, variance: 0.2 },
+                        attach_object: "ground".to_owned(),
+                        attach_offset_x: 0.0,
+                        attach_offset_y: -16.0,
+                    },
+                    LightSpec {
+                        id: "spot".to_owned(),
+                        kind: LightKindSpec::Spot { direction: 90.0, cone_angle: 45.0 },
+                        x: 800.0,
+                        y: 200.0,
+                        color: [255, 255, 240, 255],
+                        radius: 500.0,
+                        intensity: 1.0,
+                        enabled: true,
+                        casts_shadows: false,
+                        effect: LightEffectSpec::Pulse {
+                            min_intensity: 0.4,
+                            max_intensity: 1.0,
+                            speed: 2.0,
+                        },
+                        attach_object: String::new(),
+                        attach_offset_x: 0.0,
+                        attach_offset_y: 0.0,
+                    },
+                    LightSpec {
+                        id: "sun".to_owned(),
+                        kind: LightKindSpec::Directional { dx: 0.3, dy: -1.0 },
+                        x: 0.0,
+                        y: 0.0,
+                        color: [255, 248, 220, 255],
+                        radius: 4000.0,
+                        intensity: 0.6,
+                        enabled: false,
+                        casts_shadows: true,
+                        effect: LightEffectSpec::ColorCycle {
+                            colors: vec![[255, 200, 150, 255], [150, 200, 255, 255]],
+                            speed: 0.5,
+                        },
+                        attach_object: String::new(),
+                        attach_offset_x: 0.0,
+                        attach_offset_y: 0.0,
+                    },
+                    LightSpec {
+                        id: "fade_in".to_owned(),
+                        effect: LightEffectSpec::FadeIn { target_intensity: 1.0, duration: 2.0 },
+                        ..LightSpec::new("fade_in")
+                    },
+                    LightSpec {
+                        id: "fade_out".to_owned(),
+                        effect: LightEffectSpec::FadeOut { duration: 1.5 },
+                        ..LightSpec::new("fade_out")
+                    },
+                ],
+            };
+
+            scene.post_fx = PostFxSpec {
+                bloom_enabled: true,
+                bloom_threshold: 0.8,
+                bloom_strength: 0.4,
+                mode: PostFxMode::NightMode {
+                    bloom_threshold: 0.75,
+                    bloom_strength: 0.5,
+                    vignette_strength: 0.6,
+                    vignette_radius: 0.7,
+                    vignette_softness: 0.3,
+                    ca_intensity: 1.5,
+                },
+            };
+        }
+
+        let source = build_scene_source(&state, 0);
+        std::fs::write(root.join(rel), &source).unwrap();
+
+        let mut imported = EditorProjectState::new("synlt".to_owned());
+        imported.manifest.scenes[0].source_file = rel.to_owned();
+        import_files_into_state(&mut imported, &root, &[rel.to_owned()], true).unwrap();
+
+        let orig = &state.manifest.scenes[0];
+        let got = &imported.manifest.scenes[0];
+
+        assert_eq!(
+            serde_json::to_value(&orig.lighting).unwrap(),
+            serde_json::to_value(&got.lighting).unwrap(),
+            "lighting must survive roundtrip"
+        );
+        assert_eq!(
+            serde_json::to_value(&orig.post_fx).unwrap(),
+            serde_json::to_value(&got.post_fx).unwrap(),
+            "post-fx must survive roundtrip"
+        );
+
+        let got_ground = got
+            .objects
+            .iter()
+            .find(|o| o.id == "ground")
+            .expect("ground object must import");
+        assert!(got_ground.unlit, "object unlit flag lost");
+        assert!(got_ground.casts_shadow, "object casts_shadow flag lost");
+
+        // None of the lighting/post-fx/object-flag statements may reappear as
+        // raw code in a setup_runtime custom block.
+        let leaked = got.custom_code_blocks.iter().any(|b| {
+            b.code.contains("enable_lighting")
+                || b.code.contains("add_light")
+                || b.code.contains("enable_night_mode_shader")
+                || b.code.contains(".unlit")
+                || b.code.contains(".shadow_caster")
+        });
+        assert!(!leaked, "lighting/post-fx leaked into raw setup_runtime code");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6985,6 +7184,421 @@ fn extract_camera_spec(func: &ItemFn) -> Option<crate::core::project::CameraSpec
     None
 }
 
+// ── SYNFUL lighting + post-fx import ────────────────────────────────────────
+
+/// Descend a method-call chain to the base `LightSource::new(..)` call and
+/// collect the trailing `.with_shadows(..)` / `.with_effect(..)` methods.
+fn light_base_call_and_methods(expr: &Expr) -> Option<(&ExprCall, Vec<&ExprMethodCall>)> {
+    let mut methods = Vec::new();
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expr::MethodCall(mc) => {
+                methods.push(mc);
+                cursor = &mc.receiver;
+            }
+            Expr::Call(call) => {
+                if path_last_ident(&call.func).as_deref() == Some("new")
+                    && path_contains_ident(&call.func, "LightSource")
+                {
+                    methods.reverse();
+                    return Some((call, methods));
+                }
+                return None;
+            }
+            Expr::Paren(p) => cursor = &p.expr,
+            _ => return None,
+        }
+    }
+}
+
+/// Parse a `LightEffect::Variant { .. }` expression back into a LightEffectSpec.
+fn parse_light_effect_expr(expr: &Expr) -> Option<crate::core::project::LightEffectSpec> {
+    use crate::core::project::LightEffectSpec as E;
+    let Expr::Struct(s) = expr else { return None };
+    let variant = path_last_ident(&Expr::Path(syn::ExprPath {
+        attrs: Vec::new(),
+        qself: None,
+        path: s.path.clone(),
+    }))?;
+    let field = |name: &str| -> Option<&Expr> {
+        s.fields
+            .iter()
+            .find(|f| matches!(&f.member, Member::Named(m) if m == name))
+            .map(|f| &f.expr)
+    };
+    let f = |name: &str| field(name).and_then(|e| expr_to_f32(e).ok());
+    Some(match variant.as_str() {
+        "Pulse" => E::Pulse {
+            min_intensity: f("min_intensity")?,
+            max_intensity: f("max_intensity")?,
+            speed: f("speed")?,
+        },
+        "Flicker" => E::Flicker {
+            base_intensity: f("base_intensity")?,
+            variance: f("variance")?,
+        },
+        "ColorCycle" => {
+            let colors_expr = field("colors")?;
+            let colors = parse_color_vec(colors_expr)?;
+            E::ColorCycle { colors, speed: f("speed")? }
+        }
+        "FadeIn" => E::FadeIn {
+            target_intensity: f("target_intensity")?,
+            duration: f("duration")?,
+        },
+        "FadeOut" => E::FadeOut { duration: f("duration")? },
+        _ => return None,
+    })
+}
+
+/// The element expressions of a `vec![a, b, ..]` macro or an `[a, b, ..]`
+/// array literal. `vec!` tokens are the comma-separated elements WITHOUT
+/// brackets, so they parse as a `Punctuated`, not an `ExprArray`.
+fn vec_or_array_elems(expr: &Expr) -> Option<Vec<Expr>> {
+    if let Expr::Macro(m) = expr {
+        if m.mac.path.is_ident("vec") {
+            let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+            let elems = parser.parse2(m.mac.tokens.clone()).ok()?;
+            return Some(elems.into_iter().collect());
+        }
+    }
+    if let Expr::Array(arr) = expr {
+        return Some(arr.elems.iter().cloned().collect());
+    }
+    None
+}
+
+/// Parse `vec![Color(..), Color(..)]` into a list of RGBA arrays.
+fn parse_color_vec(expr: &Expr) -> Option<Vec<[u8; 4]>> {
+    vec_or_array_elems(expr)?.iter().map(expr_to_rgba_u8).collect()
+}
+
+/// Parse `LightType::{Point|Spot{..}|Directional{..}}` into a LightKindSpec.
+fn parse_light_kind_expr(expr: &Expr) -> Option<crate::core::project::LightKindSpec> {
+    use crate::core::project::LightKindSpec as K;
+    match expr {
+        Expr::Path(_) if path_last_ident(expr).as_deref() == Some("Point") => Some(K::Point),
+        Expr::Struct(s) => {
+            let variant = path_last_ident(&Expr::Path(syn::ExprPath {
+                attrs: Vec::new(),
+                qself: None,
+                path: s.path.clone(),
+            }))?;
+            let field = |name: &str| -> Option<&Expr> {
+                s.fields
+                    .iter()
+                    .find(|f| matches!(&f.member, Member::Named(m) if m == name))
+                    .map(|f| &f.expr)
+            };
+            match variant.as_str() {
+                "Spot" => Some(K::Spot {
+                    direction: expr_to_f32(field("direction")?).ok()?,
+                    cone_angle: expr_to_f32(field("cone_angle")?).ok()?,
+                }),
+                "Directional" => {
+                    let dir = field("direction")?;
+                    let Expr::Tuple(t) = dir else { return None };
+                    Some(K::Directional {
+                        dx: expr_to_f32(t.elems.first()?).ok()?,
+                        dy: expr_to_f32(t.elems.get(1)?).ok()?,
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Parse one `add_light` argument (either a direct `LightSource::new(..)` chain
+/// or a `{ let mut __light = ..; __light.field = ..; __light }` block) into a
+/// LightSpec. The block form carries the light_type / enabled field mutations.
+fn parse_light_source_expr(expr: &Expr) -> Option<crate::core::project::LightSpec> {
+    use crate::core::project::LightSpec;
+
+    // A block wraps the core expression and adds field mutations.
+    let (core_expr, field_stmts): (&Expr, Vec<&Stmt>) = match expr {
+        Expr::Block(b) => {
+            let stmts = &b.block.stmts;
+            // First statement: `let mut __light = <core>;`
+            let core = stmts.iter().find_map(|s| {
+                if let Stmt::Local(local) = s {
+                    if let Pat::Ident(PatIdent { ident, .. }) = &local.pat {
+                        if ident == "__light" {
+                            return local.init.as_ref().map(|i| &*i.expr);
+                        }
+                    }
+                }
+                None
+            })?;
+            (core, stmts.iter().collect())
+        }
+        other => (other, Vec::new()),
+    };
+
+    let (base, methods) = light_base_call_and_methods(core_expr)?;
+    // LightSource::new(id, (x, y), color, radius, intensity)
+    if base.args.len() < 5 {
+        return None;
+    }
+    let id = extract_string_literal(&base.args[0])?;
+    let (x, y) = {
+        let Expr::Tuple(t) = &base.args[1] else { return None };
+        (expr_to_f32(t.elems.first()?).ok()?, expr_to_f32(t.elems.get(1)?).ok()?)
+    };
+    let color = expr_to_rgba_u8(&base.args[2])?;
+    let radius = expr_to_f32(&base.args[3]).ok()?;
+    let intensity = expr_to_f32(&base.args[4]).ok()?;
+
+    let mut light = LightSpec::new(id);
+    light.x = x;
+    light.y = y;
+    light.color = color;
+    light.radius = radius;
+    light.intensity = intensity;
+
+    for mc in methods {
+        match mc.method.to_string().as_str() {
+            "with_shadows" => {
+                light.casts_shadows =
+                    mc.args.first().and_then(|e| expr_to_bool(e).ok()).unwrap_or(true);
+            }
+            "with_effect" => {
+                if let Some(fx) = mc.args.first().and_then(parse_light_effect_expr) {
+                    light.effect = fx;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Field mutations from the block form (light_type / enabled).
+    for stmt in field_stmts {
+        let Stmt::Expr(Expr::Assign(assign), _) = stmt else { continue };
+        let Expr::Field(field) = &*assign.left else { continue };
+        let Member::Named(member) = &field.member else { continue };
+        match member.to_string().as_str() {
+            "light_type" => {
+                if let Some(kind) = parse_light_kind_expr(&assign.right) {
+                    light.kind = kind;
+                }
+            }
+            "enabled" => {
+                light.enabled = expr_to_bool(&assign.right).unwrap_or(true);
+            }
+            _ => {}
+        }
+    }
+    Some(light)
+}
+
+/// Structured import of the SYNFUL lighting block: `enable_lighting` +
+/// `add_light` calls + `attach_light` calls.
+fn extract_lighting_spec(func: &ItemFn) -> Option<crate::core::project::LightingSpec> {
+    let mut spec = crate::core::project::LightingSpec::default();
+    let mut found = false;
+
+    for stmt in &func.block.stmts {
+        let Stmt::Expr(Expr::MethodCall(call), _) = stmt else { continue };
+        if expr_ident_name(&call.receiver).as_deref() != Some("canvas") {
+            continue;
+        }
+        match call.method.to_string().as_str() {
+            "enable_lighting" => {
+                found = true;
+                spec.enabled = true;
+                // enable_lighting(LightingConfig { ambient: AmbientLight { color, strength }, max_lights })
+                if let Some(Expr::Struct(cfg)) = call.args.first() {
+                    for field in &cfg.fields {
+                        let Member::Named(name) = &field.member else { continue };
+                        match name.to_string().as_str() {
+                            "ambient" => {
+                                if let Expr::Struct(amb) = &field.expr {
+                                    for af in &amb.fields {
+                                        let Member::Named(an) = &af.member else { continue };
+                                        match an.to_string().as_str() {
+                                            "color" => {
+                                                if let Some(c) = expr_to_rgba_u8(&af.expr) {
+                                                    spec.ambient_color = c;
+                                                }
+                                            }
+                                            "strength" => {
+                                                if let Ok(s) = expr_to_f32(&af.expr) {
+                                                    spec.ambient_strength = s;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            "max_lights" => {
+                                if let Ok(n) = expr_to_u32(&field.expr) {
+                                    spec.max_lights = n as usize;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "add_light" => {
+                if let Some(light) = call.args.first().and_then(parse_light_source_expr) {
+                    found = true;
+                    spec.lights.push(light);
+                }
+            }
+            "attach_light" => {
+                // attach_light("light_id", "object", (ox, oy))
+                if call.args.len() >= 3 {
+                    if let Some(light_id) = extract_string_literal(&call.args[0]) {
+                        if let Some(target) = spec.lights.iter_mut().find(|l| l.id == light_id) {
+                            target.attach_object =
+                                extract_string_literal(&call.args[1]).unwrap_or_default();
+                            if let Expr::Tuple(t) = &call.args[2] {
+                                target.attach_offset_x =
+                                    t.elems.first().and_then(|e| expr_to_f32(e).ok()).unwrap_or(0.0);
+                                target.attach_offset_y =
+                                    t.elems.get(1).and_then(|e| expr_to_f32(e).ok()).unwrap_or(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if found { Some(spec) } else { None }
+}
+
+/// Structured import of the SYNFUL post-fx block: bloom pass + the single
+/// active post override.
+fn extract_post_fx_spec(func: &ItemFn) -> Option<crate::core::project::PostFxSpec> {
+    use crate::core::project::PostFxMode as M;
+    let mut spec = crate::core::project::PostFxSpec::default();
+    let mut found = false;
+    // register_shader_source may precede set_post_override; remember the last.
+    let mut pending_shader: Option<(String, String, String)> = None;
+
+    for stmt in &func.block.stmts {
+        let Stmt::Expr(Expr::MethodCall(call), _) = stmt else { continue };
+        if expr_ident_name(&call.receiver).as_deref() != Some("canvas") {
+            continue;
+        }
+        let f = |i: usize| call.args.get(i).and_then(|e| expr_to_f32(e).ok());
+        match call.method.to_string().as_str() {
+            "enable_bloom" => {
+                found = true;
+                spec.bloom_enabled = true;
+                if let Some(Expr::Struct(s)) = call.args.first() {
+                    for field in &s.fields {
+                        let Member::Named(name) = &field.member else { continue };
+                        match name.to_string().as_str() {
+                            "threshold" => {
+                                if let Ok(v) = expr_to_f32(&field.expr) {
+                                    spec.bloom_threshold = v;
+                                }
+                            }
+                            "strength" => {
+                                if let Ok(v) = expr_to_f32(&field.expr) {
+                                    spec.bloom_strength = v;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "enable_vignette" => {
+                found = true;
+                spec.mode = M::Vignette {
+                    strength: f(0)?,
+                    radius: f(1)?,
+                    softness: f(2)?,
+                };
+            }
+            "enable_chromatic_aberration" => {
+                found = true;
+                spec.mode = M::ChromaticAberration { intensity: f(0)? };
+            }
+            "enable_night_mode_shader" => {
+                found = true;
+                spec.mode = M::NightMode {
+                    bloom_threshold: f(0)?,
+                    bloom_strength: f(1)?,
+                    vignette_strength: f(2)?,
+                    vignette_radius: f(3)?,
+                    vignette_softness: f(4)?,
+                    ca_intensity: f(5)?,
+                };
+            }
+            "register_shader_source" => {
+                if call.args.len() >= 3 {
+                    let id = extract_string_literal(&call.args[0]).unwrap_or_default();
+                    let label = extract_string_literal(&call.args[1]).unwrap_or_default();
+                    let wgsl = extract_string_literal(&call.args[2]).unwrap_or_default();
+                    pending_shader = Some((id, label, wgsl));
+                }
+            }
+            "set_post_override" => {
+                found = true;
+                let id = call.args.first().and_then(extract_string_literal).unwrap_or_default();
+                let params = call
+                    .args
+                    .get(1)
+                    .and_then(parse_f32_vec)
+                    .unwrap_or_default();
+                let (shader_id, label, wgsl) = match &pending_shader {
+                    Some((sid, lbl, w)) if *sid == id => (id, lbl.clone(), w.clone()),
+                    _ => (id, String::new(), String::new()),
+                };
+                spec.mode = M::Custom { shader_id, label, wgsl, params };
+            }
+            _ => {}
+        }
+    }
+
+    if found { Some(spec) } else { None }
+}
+
+/// Parse `vec![1.0, 2.0]` into a Vec<f32>.
+fn parse_f32_vec(expr: &Expr) -> Option<Vec<f32>> {
+    vec_or_array_elems(expr)?.iter().map(|e| expr_to_f32(e).ok()).collect()
+}
+
+/// True if a setup_scene statement is a SYNFUL lighting or post-fx call that
+/// was imported structurally — consumed from the setup_runtime catch-all so it
+/// is not also copied as raw code.
+fn is_synful_lighting_stmt(stmt: &Stmt) -> bool {
+    let Stmt::Expr(Expr::MethodCall(call), _) = stmt else { return false };
+    if expr_ident_name(&call.receiver).as_deref() != Some("canvas") {
+        return false;
+    }
+    matches!(
+        call.method.to_string().as_str(),
+        "enable_lighting"
+            | "add_light"
+            | "attach_light"
+            | "enable_bloom"
+            | "enable_vignette"
+            | "enable_chromatic_aberration"
+            | "enable_night_mode_shader"
+            | "register_shader_source"
+            | "set_post_override"
+    )
+}
+
+/// True if a statement is a per-object SYNFUL lighting field assignment
+/// (`obj.unlit = true;` / `obj.shadow_caster = true;`) — imported onto the
+/// object blueprint, so consumed from the setup_runtime catch-all.
+fn is_synful_object_flag_stmt(stmt: &Stmt) -> bool {
+    let Stmt::Expr(Expr::Assign(assign), _) = stmt else { return false };
+    let Expr::Field(field) = &*assign.left else { return false };
+    matches!(&field.member, Member::Named(m) if m == "unlit" || m == "shadow_caster")
+}
+
 /// True if a setup_scene statement is the camera-authoring block that
 /// extract_camera_spec consumed (so it isn't also copied into setup_runtime).
 fn is_camera_block_stmt(stmt: &Stmt) -> bool {
@@ -7126,6 +7740,12 @@ fn extract_setup_scene_runtime_statements(
             // them here (checked FIRST; their Local/Expr statements would
             // otherwise be caught by the arms below and copied as raw code).
             if is_camera_block_stmt(stmt) || is_background_stmt(stmt, background_object_id) {
+                return None;
+            }
+            // SYNFUL: lighting/post-fx calls and per-object lighting flags are
+            // imported structurally (LightingSpec/PostFxSpec/object flags), so
+            // consume them here to avoid a duplicate raw copy in setup_runtime.
+            if is_synful_lighting_stmt(stmt) || is_synful_object_flag_stmt(stmt) {
                 return None;
             }
             match stmt {

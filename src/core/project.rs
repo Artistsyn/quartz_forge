@@ -79,6 +79,8 @@ impl ProjectManifest {
             pools: Vec::new(),
             camera: CameraSpec::default(),
             background: BackgroundSpec::default(),
+            lighting: LightingSpec::default(),
+            post_fx: PostFxSpec::default(),
         }
     }
 
@@ -167,6 +169,227 @@ pub struct SceneDocument {
     /// Composited full-screen background (generates a real background object).
     #[serde(default)]
     pub background: BackgroundSpec,
+    /// SYNFUL-ONLY: real-time lighting + shadow authoring. Official quartz has
+    /// no `lighting` module, so this never emits in the main-branch forge.
+    #[serde(default)]
+    pub lighting: LightingSpec,
+    /// SYNFUL-ONLY: GPU post-processing stack (bloom + one post override).
+    #[serde(default)]
+    pub post_fx: PostFxSpec,
+}
+
+// ── SYNFUL lighting authoring ───────────────────────────────────────────────
+//
+// Ground truth: `arty/synful_quartz/quartz/src/lighting/types.rs` and
+// `quartz/src/canvas/lighting_bridge.rs`. These types exist ONLY in the
+// synful fork — the official quartz engine has no lighting module at all,
+// which is why this whole surface lives in the synful copy of the forge.
+
+/// Which kind of light. Mirrors `quartz::LightType`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LightKindSpec {
+    Point,
+    Spot { direction: f32, cone_angle: f32 },
+    Directional { dx: f32, dy: f32 },
+}
+
+impl Default for LightKindSpec {
+    fn default() -> Self {
+        LightKindSpec::Point
+    }
+}
+
+impl LightKindSpec {
+    pub const ALL: [&'static str; 3] = ["Point", "Spot", "Directional"];
+
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            LightKindSpec::Point => "Point",
+            LightKindSpec::Spot { .. } => "Spot",
+            LightKindSpec::Directional { .. } => "Directional",
+        }
+    }
+}
+
+/// Per-light animation, ticked by the engine's `LightingSystem`.
+/// Mirrors `quartz::LightEffect` plus a `None` case (the engine models the
+/// absence as `Option<LightEffect>`; flattening it keeps the UI a single combo).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LightEffectSpec {
+    None,
+    Pulse { min_intensity: f32, max_intensity: f32, speed: f32 },
+    Flicker { base_intensity: f32, variance: f32 },
+    ColorCycle { colors: Vec<[u8; 4]>, speed: f32 },
+    FadeIn { target_intensity: f32, duration: f32 },
+    FadeOut { duration: f32 },
+}
+
+impl Default for LightEffectSpec {
+    fn default() -> Self {
+        LightEffectSpec::None
+    }
+}
+
+impl LightEffectSpec {
+    pub const ALL: [&'static str; 6] =
+        ["None", "Pulse", "Flicker", "ColorCycle", "FadeIn", "FadeOut"];
+
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            LightEffectSpec::None => "None",
+            LightEffectSpec::Pulse { .. } => "Pulse",
+            LightEffectSpec::Flicker { .. } => "Flicker",
+            LightEffectSpec::ColorCycle { .. } => "ColorCycle",
+            LightEffectSpec::FadeIn { .. } => "FadeIn",
+            LightEffectSpec::FadeOut { .. } => "FadeOut",
+        }
+    }
+}
+
+/// A single authored light. Emits as `LightSource::new(..)` plus the
+/// builder/field mutations needed for the non-default parts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightSpec {
+    pub id: String,
+    #[serde(default)]
+    pub kind: LightKindSpec,
+    pub x: f32,
+    pub y: f32,
+    /// RGBA — `quartz::Color` is a 4-field tuple struct `Color(r, g, b, a)`.
+    pub color: [u8; 4],
+    pub radius: f32,
+    pub intensity: f32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// `LightSource::new` defaults this to true.
+    #[serde(default = "default_true")]
+    pub casts_shadows: bool,
+    #[serde(default)]
+    pub effect: LightEffectSpec,
+    /// When non-empty, emits `canvas.attach_light(id, object, offset)` so the
+    /// light follows that object every frame.
+    #[serde(default)]
+    pub attach_object: String,
+    #[serde(default)]
+    pub attach_offset_x: f32,
+    #[serde(default)]
+    pub attach_offset_y: f32,
+}
+
+impl LightSpec {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            kind: LightKindSpec::Point,
+            x: 0.0,
+            y: 0.0,
+            color: [255, 220, 150, 255],
+            radius: 350.0,
+            intensity: 0.7,
+            enabled: true,
+            casts_shadows: true,
+            effect: LightEffectSpec::None,
+            attach_object: String::new(),
+            attach_offset_x: 0.0,
+            attach_offset_y: 0.0,
+        }
+    }
+}
+
+/// Scene-level lighting. Emits `canvas.enable_lighting(LightingConfig { .. })`
+/// followed by one `canvas.add_light(..)` per light.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightingSpec {
+    pub enabled: bool,
+    /// Ambient is what makes lights readable — at strength 1.0 everything is
+    /// already fully lit and individual lights are invisible.
+    pub ambient_color: [u8; 4],
+    pub ambient_strength: f32,
+    pub max_lights: usize,
+    pub lights: Vec<LightSpec>,
+}
+
+impl Default for LightingSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            // Matches `AmbientLight::dark()` — the preset that makes authored
+            // lights actually visible.
+            ambient_color: [10, 10, 25, 255],
+            ambient_strength: 0.06,
+            max_lights: 64,
+            lights: Vec::new(),
+        }
+    }
+}
+
+/// The single active post-processing override. The engine holds ONE
+/// `active_post_override` at a time, so this is an enum rather than a set of
+/// independent toggles — modelling it as flags would let the UI express a
+/// combination the engine silently collapses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PostFxMode {
+    None,
+    Vignette { strength: f32, radius: f32, softness: f32 },
+    ChromaticAberration { intensity: f32 },
+    NightMode {
+        bloom_threshold: f32,
+        bloom_strength: f32,
+        vignette_strength: f32,
+        vignette_radius: f32,
+        vignette_softness: f32,
+        ca_intensity: f32,
+    },
+    /// Author-supplied WGSL registered via `register_shader_source` then
+    /// activated with `set_post_override`.
+    Custom { shader_id: String, label: String, wgsl: String, params: Vec<f32> },
+}
+
+impl Default for PostFxMode {
+    fn default() -> Self {
+        PostFxMode::None
+    }
+}
+
+impl PostFxMode {
+    pub const ALL: [&'static str; 5] =
+        ["None", "Vignette", "ChromaticAberration", "NightMode", "Custom"];
+
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            PostFxMode::None => "None",
+            PostFxMode::Vignette { .. } => "Vignette",
+            PostFxMode::ChromaticAberration { .. } => "ChromaticAberration",
+            PostFxMode::NightMode { .. } => "NightMode",
+            PostFxMode::Custom { .. } => "Custom",
+        }
+    }
+}
+
+/// GPU post-processing. Bloom is a separate pass from the post override, so
+/// it composes with any mode (that is why it is a sibling field, not a variant).
+///
+/// Deliberately excluded: `enable_air_barrier`. Its 11 arguments are per-frame
+/// gameplay values (time, player speed, player screen UV, facing direction) —
+/// it is a runtime effect, not scene authoring, and belongs in custom code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostFxSpec {
+    pub bloom_enabled: bool,
+    pub bloom_threshold: f32,
+    pub bloom_strength: f32,
+    pub mode: PostFxMode,
+}
+
+impl Default for PostFxSpec {
+    fn default() -> Self {
+        Self {
+            bloom_enabled: false,
+            // Matches `BloomSettings::default()`.
+            bloom_threshold: 0.8,
+            bloom_strength: 0.4,
+            mode: PostFxMode::None,
+        }
+    }
 }
 
 /// Runtime camera authoring for a scene. Emitted into setup_scene via

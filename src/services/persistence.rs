@@ -427,7 +427,10 @@ fn should_rewrite_managed_main(existing: &str) -> bool {
 
 fn managed_lib_rs(scene_module_path: &str, canvas_mode: &str) -> String {
     format!(
-        "{MANAGED_LIB_MARKER}\nuse quartz::*;\nuse ramp::prism;\nuse ramp::Drawable;\n\n#[path = \"{scene_module_path}\"]\nmod generated_scene;\n\npub struct App;\n\nimpl App {{\n    fn new(ctx: &mut Context) -> impl Drawable {{\n        let mut canvas = Canvas::new(ctx, {canvas_mode});\n        generated_scene::setup_scene(&mut canvas);\n        generated_scene::register_logic(&mut canvas);\n        generated_scene::register_events(&mut canvas);\n        canvas\n    }}\n}}\n\nramp::run! {{ []; |ctx: &mut Context| {{ App::new(ctx) }} }}\n"
+        // SYNFUL: no explicit `use ramp::Drawable;` — synful `quartz::*` already
+        // re-exports Drawable, so importing it again shadows the public glob
+        // re-export (a warning; generated code must stay warning-clean).
+        "{MANAGED_LIB_MARKER}\nuse quartz::*;\nuse ramp::prism;\n\n#[path = \"{scene_module_path}\"]\nmod generated_scene;\n\npub struct App;\n\nimpl App {{\n    fn new(ctx: &mut Context) -> impl Drawable {{\n        let mut canvas = Canvas::new(ctx, {canvas_mode});\n        generated_scene::setup_scene(&mut canvas);\n        generated_scene::register_logic(&mut canvas);\n        generated_scene::register_events(&mut canvas);\n        canvas\n    }}\n}}\n\nramp::run! {{ []; |ctx: &mut Context| {{ App::new(ctx) }} }}\n"
     )
 }
 

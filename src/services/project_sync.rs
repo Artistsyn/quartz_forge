@@ -248,6 +248,10 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     out.push_str(&codegen::scene_pool_lines(scene));
     out.push_str(&codegen::scene_camera_lines(scene));
     out.push_str(&codegen::scene_background_lines(scene));
+    // Phase 5 (SYNFUL): lighting + post-fx. Must come after objects are in the
+    // canvas — attach_light and set_shadow_caster bind to objects by name.
+    out.push_str(&codegen::scene_lighting_lines(scene));
+    out.push_str(&codegen::scene_post_fx_lines(scene));
 
     out.push_str("}\n\n");
 
@@ -321,7 +325,11 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     }
     out.push_str("}\n");
 
-    out
+    // Generated code must be warning-clean. The preview emitter in codegen.rs
+    // demotes unneeded `let mut` bindings, but this — the actual file writer —
+    // did not, so written scenes carried `unused_mut` warnings the preview
+    // never showed. Same two-emitter divergence class as plugins/pools.
+    codegen::demote_unneeded_muts(out)
 }
 
 pub fn build_component_module_source(

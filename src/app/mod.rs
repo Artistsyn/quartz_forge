@@ -86,6 +86,204 @@ pub(super) struct EditorSuggestions {
     pub background_keys: Vec<String>,
 }
 
+// ── SYNFUL lighting editor helpers ──────────────────────────────────────────
+
+/// RGBA color picker over a `[u8; 4]` (egui's srgb button is RGB-only, so this
+/// edits RGB and preserves the existing alpha).
+fn color_edit_rgba(ui: &mut egui::Ui, color: &mut [u8; 4]) -> bool {
+    let mut rgb = [color[0], color[1], color[2]];
+    let changed = ui.color_edit_button_srgb(&mut rgb).changed();
+    if changed {
+        color[0] = rgb[0];
+        color[1] = rgb[1];
+        color[2] = rgb[2];
+    }
+    changed
+}
+
+fn light_kind_editor(ui: &mut egui::Ui, kind: &mut crate::core::project::LightKindSpec) -> bool {
+    use crate::core::project::LightKindSpec as K;
+    let mut changed = false;
+    let current = kind.variant_name();
+    egui::ComboBox::from_id_salt("light_kind")
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            for name in K::ALL {
+                if ui.selectable_label(current == name, name).clicked() && current != name {
+                    *kind = match name {
+                        "Point" => K::Point,
+                        "Spot" => K::Spot { direction: 90.0, cone_angle: 45.0 },
+                        "Directional" => K::Directional { dx: 0.0, dy: -1.0 },
+                        _ => K::Point,
+                    };
+                    changed = true;
+                }
+            }
+        });
+    match kind {
+        K::Point => {}
+        K::Spot { direction, cone_angle } => {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(egui::DragValue::new(direction).prefix("dir° "))
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(cone_angle).range(0.0..=360.0).prefix("cone° "))
+                    .changed();
+            });
+        }
+        K::Directional { dx, dy } => {
+            ui.horizontal(|ui| {
+                changed |= ui.add(egui::DragValue::new(dx).speed(0.05).prefix("dx ")).changed();
+                changed |= ui.add(egui::DragValue::new(dy).speed(0.05).prefix("dy ")).changed();
+            });
+        }
+    }
+    changed
+}
+
+fn light_effect_editor(ui: &mut egui::Ui, effect: &mut crate::core::project::LightEffectSpec) -> bool {
+    use crate::core::project::LightEffectSpec as E;
+    let mut changed = false;
+    let current = effect.variant_name();
+    egui::ComboBox::from_id_salt("light_effect")
+        .selected_text(format!("effect: {current}"))
+        .show_ui(ui, |ui| {
+            for name in E::ALL {
+                if ui.selectable_label(current == name, name).clicked() && current != name {
+                    *effect = match name {
+                        "None" => E::None,
+                        "Pulse" => E::Pulse { min_intensity: 0.4, max_intensity: 1.0, speed: 2.0 },
+                        "Flicker" => E::Flicker { base_intensity: 0.8, variance: 0.2 },
+                        "ColorCycle" => E::ColorCycle {
+                            colors: vec![[255, 200, 150, 255], [150, 200, 255, 255]],
+                            speed: 0.5,
+                        },
+                        "FadeIn" => E::FadeIn { target_intensity: 1.0, duration: 2.0 },
+                        "FadeOut" => E::FadeOut { duration: 1.5 },
+                        _ => E::None,
+                    };
+                    changed = true;
+                }
+            }
+        });
+    match effect {
+        E::None => {}
+        E::Pulse { min_intensity, max_intensity, speed } => {
+            changed |= ui.add(egui::Slider::new(min_intensity, 0.0..=4.0).text("min")).changed();
+            changed |= ui.add(egui::Slider::new(max_intensity, 0.0..=4.0).text("max")).changed();
+            changed |= ui.add(egui::DragValue::new(speed).speed(0.1).prefix("speed ")).changed();
+        }
+        E::Flicker { base_intensity, variance } => {
+            changed |= ui.add(egui::Slider::new(base_intensity, 0.0..=4.0).text("base")).changed();
+            changed |= ui.add(egui::Slider::new(variance, 0.0..=2.0).text("variance")).changed();
+        }
+        E::ColorCycle { colors, speed } => {
+            let mut rm: Option<usize> = None;
+            for (i, c) in colors.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    changed |= color_edit_rgba(ui, c);
+                    if ui.small_button("x").clicked() {
+                        rm = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = rm {
+                colors.remove(i);
+                changed = true;
+            }
+            if ui.small_button("+ color").clicked() {
+                colors.push([255, 255, 255, 255]);
+                changed = true;
+            }
+            changed |= ui.add(egui::DragValue::new(speed).speed(0.1).prefix("speed ")).changed();
+        }
+        E::FadeIn { target_intensity, duration } => {
+            changed |= ui.add(egui::Slider::new(target_intensity, 0.0..=4.0).text("target")).changed();
+            changed |= ui.add(egui::DragValue::new(duration).speed(0.1).prefix("secs ")).changed();
+        }
+        E::FadeOut { duration } => {
+            changed |= ui.add(egui::DragValue::new(duration).speed(0.1).prefix("secs ")).changed();
+        }
+    }
+    changed
+}
+
+fn post_fx_mode_editor(ui: &mut egui::Ui, mode: &mut crate::core::project::PostFxMode) -> bool {
+    use crate::core::project::PostFxMode as M;
+    let mut changed = false;
+    let current = mode.variant_name();
+    egui::ComboBox::from_id_salt("post_fx_mode")
+        .selected_text(format!("override: {current}"))
+        .show_ui(ui, |ui| {
+            for name in M::ALL {
+                if ui.selectable_label(current == name, name).clicked() && current != name {
+                    *mode = match name {
+                        "None" => M::None,
+                        "Vignette" => M::Vignette { strength: 0.6, radius: 0.7, softness: 0.3 },
+                        "ChromaticAberration" => M::ChromaticAberration { intensity: 1.5 },
+                        "NightMode" => M::NightMode {
+                            bloom_threshold: 0.75,
+                            bloom_strength: 0.5,
+                            vignette_strength: 0.6,
+                            vignette_radius: 0.7,
+                            vignette_softness: 0.3,
+                            ca_intensity: 1.5,
+                        },
+                        "Custom" => M::Custom {
+                            shader_id: "my_shader".to_owned(),
+                            label: "My Shader".to_owned(),
+                            wgsl: String::new(),
+                            params: Vec::new(),
+                        },
+                        _ => M::None,
+                    };
+                    changed = true;
+                }
+            }
+        });
+    match mode {
+        M::None => {}
+        M::Vignette { strength, radius, softness } => {
+            changed |= ui.add(egui::Slider::new(strength, 0.0..=1.0).text("strength")).changed();
+            changed |= ui.add(egui::Slider::new(radius, 0.0..=1.0).text("radius")).changed();
+            changed |= ui.add(egui::Slider::new(softness, 0.0..=1.0).text("softness")).changed();
+        }
+        M::ChromaticAberration { intensity } => {
+            changed |= ui.add(egui::Slider::new(intensity, 0.0..=8.0).text("px")).changed();
+        }
+        M::NightMode {
+            bloom_threshold,
+            bloom_strength,
+            vignette_strength,
+            vignette_radius,
+            vignette_softness,
+            ca_intensity,
+        } => {
+            changed |= ui.add(egui::Slider::new(bloom_threshold, 0.0..=1.0).text("bloom thr")).changed();
+            changed |= ui.add(egui::Slider::new(bloom_strength, 0.0..=2.0).text("bloom str")).changed();
+            changed |= ui.add(egui::Slider::new(vignette_strength, 0.0..=1.0).text("vig str")).changed();
+            changed |= ui.add(egui::Slider::new(vignette_radius, 0.0..=1.0).text("vig rad")).changed();
+            changed |= ui.add(egui::Slider::new(vignette_softness, 0.0..=1.0).text("vig soft")).changed();
+            changed |= ui.add(egui::Slider::new(ca_intensity, 0.0..=8.0).text("CA px")).changed();
+        }
+        M::Custom { shader_id, label, wgsl, params } => {
+            ui.horizontal(|ui| {
+                ui.label("id");
+                changed |= ui.text_edit_singleline(shader_id).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("label");
+                changed |= ui.text_edit_singleline(label).changed();
+            });
+            ui.label("WGSL:");
+            changed |= ui.add(egui::TextEdit::multiline(wgsl).desired_rows(4).code_editor()).changed();
+            ui.small(format!("{} param(s) — edit in code", params.len()));
+        }
+    }
+    changed
+}
+
 fn collision_mask_editor(ui: &mut egui::Ui, label: &str, value: &mut u32) -> bool {
     let mut changed = false;
     ui.label(label);
@@ -226,10 +424,14 @@ pub struct QuartzForgeApp {
     undock_scene_canvas: bool,
     show_camera_view_window: bool,
     show_background_window: bool,
+    /// SYNFUL: real-time lighting + post-fx authoring window.
+    show_lighting_window: bool,
     /// Cached background composite previews: key → (spec fingerprint, texture).
     /// Re-rendered only when the background's spec actually changes, so slider
     /// drags don't recomposite every frame.
     background_preview_cache: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
+    /// SYNFUL: cached lighting preview: fingerprint → texture (single scene).
+    lighting_preview_cache: Option<(u64, egui::TextureHandle)>,
     show_camera_view_grid: bool,
     show_pivot_points: bool,
     show_object_menu_window: bool,
@@ -320,7 +522,9 @@ impl Default for QuartzForgeApp {
             undock_scene_canvas: false,
             show_camera_view_window: true,
             show_background_window: false,
+            show_lighting_window: false,
             background_preview_cache: std::collections::HashMap::new(),
+            lighting_preview_cache: None,
             show_camera_view_grid: true,
             show_pivot_points: false,
             show_object_menu_window: true,
@@ -1095,6 +1299,222 @@ impl QuartzForgeApp {
         }
     }
 
+    /// SYNFUL lighting + post-fx authoring window. Edits SceneDocument.lighting
+    /// and .post_fx, and shows a live CPU approximation of the lit result.
+    fn lighting_window_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::core::project::{LightEffectSpec, LightKindSpec, LightSpec, PostFxMode};
+
+        // Phase 1 — snapshot for the preview BEFORE the &mut scene borrow.
+        let preview_data = self
+            .project_state
+            .manifest
+            .scenes
+            .get(self.project_state.active_scene_index)
+            .map(|s| (s.canvas.virtual_width, s.canvas.virtual_height, s.lighting.clone()));
+
+        if let Some((vw, vh, lighting)) = preview_data {
+            if lighting.enabled {
+                ui.label("Lit preview (approximate — real shader runs on GPU):");
+                self.lighting_preview_ui(ui, &lighting, vw, vh);
+                ui.separator();
+            }
+        }
+
+        let Some(scene) = self
+            .project_state
+            .manifest
+            .scenes
+            .get_mut(self.project_state.active_scene_index)
+        else {
+            ui.label("No active scene.");
+            return;
+        };
+
+        let mut changed = false;
+        let lt = &mut scene.lighting;
+
+        changed |= ui.checkbox(&mut lt.enabled, "Enable real-time lighting").changed();
+        ui.small("Synful-only: official quartz has no lighting module. Ambient at full strength hides all lights.");
+
+        if lt.enabled {
+            ui.separator();
+            ui.label(egui::RichText::new("Ambient").strong());
+            ui.horizontal(|ui| {
+                changed |= color_edit_rgba(ui, &mut lt.ambient_color);
+                changed |= ui
+                    .add(egui::Slider::new(&mut lt.ambient_strength, 0.0..=1.0).text("strength"))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Presets:");
+                if ui.small_button("dark").clicked() {
+                    lt.ambient_color = [10, 10, 25, 255];
+                    lt.ambient_strength = 0.06;
+                    changed = true;
+                }
+                if ui.small_button("dim").clicked() {
+                    lt.ambient_color = [80, 80, 120, 255];
+                    lt.ambient_strength = 0.2;
+                    changed = true;
+                }
+                if ui.small_button("bright/day").clicked() {
+                    lt.ambient_color = [255, 255, 255, 255];
+                    lt.ambient_strength = 0.8;
+                    changed = true;
+                }
+            });
+            changed |= ui
+                .add(egui::DragValue::new(&mut lt.max_lights).range(1..=256).prefix("max lights "))
+                .changed();
+
+            ui.separator();
+            ui.label(egui::RichText::new("Lights").strong());
+            let mut remove: Option<usize> = None;
+            for (i, light) in lt.lights.iter_mut().enumerate() {
+                ui.push_id(format!("light_{i}"), |ui| {
+                    egui::CollapsingHeader::new(if light.id.is_empty() {
+                        format!("light {i}")
+                    } else {
+                        light.id.clone()
+                    })
+                    .id_salt(format!("light_hdr_{i}"))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("id");
+                            changed |= ui.text_edit_singleline(&mut light.id).changed();
+                            if ui.small_button("🗑 remove").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                        changed |= light_kind_editor(ui, &mut light.kind);
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut light.x).prefix("x "))
+                                .changed();
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut light.y).prefix("y "))
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("color");
+                            changed |= color_edit_rgba(ui, &mut light.color);
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut light.radius).range(0.0..=10000.0).prefix("radius "))
+                                .changed();
+                        });
+                        changed |= ui
+                            .add(egui::Slider::new(&mut light.intensity, 0.0..=4.0).text("intensity"))
+                            .changed();
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut light.enabled, "enabled").changed();
+                            changed |= ui.checkbox(&mut light.casts_shadows, "casts shadows").changed();
+                        });
+                        changed |= light_effect_editor(ui, &mut light.effect);
+                        ui.horizontal(|ui| {
+                            ui.label("attach to object");
+                            changed |= ui.text_edit_singleline(&mut light.attach_object).changed();
+                        });
+                        if !light.attach_object.trim().is_empty() {
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .add(egui::DragValue::new(&mut light.attach_offset_x).prefix("off x "))
+                                    .changed();
+                                changed |= ui
+                                    .add(egui::DragValue::new(&mut light.attach_offset_y).prefix("off y "))
+                                    .changed();
+                            });
+                        }
+                    });
+                });
+            }
+            if let Some(i) = remove {
+                lt.lights.remove(i);
+                changed = true;
+            }
+            ui.horizontal(|ui| {
+                if ui.button("+ Point light").clicked() {
+                    let id = format!("light_{}", lt.lights.len() + 1);
+                    lt.lights.push(LightSpec::new(id));
+                    changed = true;
+                }
+                if ui.small_button("+ Torch preset").clicked() {
+                    let mut l = LightSpec::new(format!("torch_{}", lt.lights.len() + 1));
+                    l.color = [255, 180, 80, 255];
+                    l.radius = 300.0;
+                    l.intensity = 0.8;
+                    l.effect = LightEffectSpec::Flicker { base_intensity: 0.8, variance: 0.2 };
+                    lt.lights.push(l);
+                    changed = true;
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new("Post-processing (GPU)").strong());
+        let fx = &mut scene.post_fx;
+        changed |= ui.checkbox(&mut fx.bloom_enabled, "Bloom").changed();
+        if fx.bloom_enabled {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(egui::Slider::new(&mut fx.bloom_threshold, 0.0..=1.0).text("threshold"))
+                    .changed();
+                changed |= ui
+                    .add(egui::Slider::new(&mut fx.bloom_strength, 0.0..=2.0).text("strength"))
+                    .changed();
+            });
+        }
+        changed |= post_fx_mode_editor(ui, &mut fx.mode);
+        let _ = PostFxMode::ALL; // keep the variant list referenced for the editor
+        let _ = LightKindSpec::ALL;
+
+        if changed {
+            self.project_state.dirty = true;
+        }
+    }
+
+    /// Live lighting preview texture (cached by spec fingerprint).
+    fn lighting_preview_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        lighting: &crate::core::project::LightingSpec,
+        vw: f32,
+        vh: f32,
+    ) {
+        use std::hash::{Hash, Hasher};
+        let fingerprint = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(lighting).unwrap_or_default().hash(&mut h);
+            vw.to_bits().hash(&mut h);
+            vh.to_bits().hash(&mut h);
+            h.finish()
+        };
+        let needs = self
+            .lighting_preview_cache
+            .as_ref()
+            .map(|(fp, _)| *fp != fingerprint)
+            .unwrap_or(true);
+        if needs {
+            let (pw, ph) = crate::services::background_preview::preview_size(vw, vh, 320);
+            let img = crate::services::lighting_preview::render_lighting_preview(lighting, vw, vh, pw, ph);
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize],
+                img.as_raw(),
+            );
+            let texture = ui.ctx().load_texture(
+                "lighting_preview",
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.lighting_preview_cache = Some((fingerprint, texture));
+        }
+        if let Some((_, texture)) = &self.lighting_preview_cache {
+            let avail = ui.available_width().min(320.0);
+            let aspect = if vh > 0.0 { vw / vh } else { 16.0 / 9.0 };
+            let size = egui::vec2(avail, (avail / aspect.max(0.05)).max(24.0));
+            ui.add(egui::Image::new(texture).fit_to_exact_size(size));
+        }
+    }
+
     /// Reusable layer-stack editor (list + reorder/remove + add buttons).
     /// `salt` disambiguates widget ids across multiple stacks in one window.
     fn background_layer_stack_ui(
@@ -1711,6 +2131,7 @@ impl QuartzForgeApp {
             ui.checkbox(&mut self.undock_scene_canvas, "undock scene canvas window");
             ui.checkbox(&mut self.show_camera_view_window, "show camera view window");
             ui.checkbox(&mut self.show_background_window, "background authoring window");
+            ui.checkbox(&mut self.show_lighting_window, "lighting & post-fx window");
             ui.checkbox(&mut self.show_pivot_points, "show pivot points");
             ui.checkbox(&mut self.show_spawn_overlay, "show spawn overlay");
         });
@@ -1828,6 +2249,22 @@ impl QuartzForgeApp {
                     self.background_window_panel(ui);
                 });
             self.show_background_window = open;
+        }
+
+        if self.show_lighting_window {
+            let mut open = self.show_lighting_window;
+            egui::Window::new("Lighting & Post-FX (synful)")
+                .resizable(true)
+                .default_size(egui::vec2(440.0, 560.0))
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("lighting_window_scroll")
+                        .show(ui, |ui| {
+                            self.lighting_window_panel(ui);
+                        });
+                });
+            self.show_lighting_window = open;
         }
 
         let object_menu_window_id = egui::Id::new("object_menu_window");
@@ -5532,6 +5969,17 @@ impl QuartzForgeApp {
             object.is_background = false;
         }
         changed |= ui.checkbox(&mut object.lock_transform, "lock transform in canvas/editor").changed();
+        // SYNFUL: per-object lighting flags.
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut object.unlit, "unlit")
+                .on_hover_text("Exclude from lighting. Recommended for large backgrounds/terrain (tinted uniformly from center otherwise).")
+                .changed();
+            changed |= ui
+                .checkbox(&mut object.casts_shadow, "casts shadow")
+                .on_hover_text("This object occludes light and casts shadows (synful only).")
+                .changed();
+        });
         ui.add_enabled_ui(!object.lock_transform, |ui| {
             changed |= ui.add(Slider::new(&mut object.x, -8000.0..=8000.0).text("x")).changed();
             changed |= ui.add(Slider::new(&mut object.y, -8000.0..=8000.0).text("y")).changed();
@@ -6756,6 +7204,60 @@ mod tests {
         }
         app.show_background_window = true;
 
+        // SYNFUL: populate lighting + post-fx + per-object flags so the
+        // lighting window (incl. the lit preview) and object editor branches
+        // are all exercised headlessly.
+        {
+            use crate::core::project::{LightEffectSpec, LightKindSpec, LightSpec, PostFxMode};
+            let scene = &mut app.project_state.manifest.scenes[0];
+            scene.lighting.enabled = true;
+            scene.lighting.ambient_color = [10, 10, 25, 255];
+            scene.lighting.ambient_strength = 0.06;
+            scene.lighting.lights = vec![
+                LightSpec {
+                    id: "torch".to_owned(),
+                    kind: LightKindSpec::Point,
+                    x: 400.0,
+                    y: 300.0,
+                    color: [255, 180, 80, 255],
+                    radius: 300.0,
+                    intensity: 0.8,
+                    effect: LightEffectSpec::Flicker { base_intensity: 0.8, variance: 0.2 },
+                    attach_object: "player".to_owned(),
+                    attach_offset_y: -16.0,
+                    ..LightSpec::new("torch")
+                },
+                LightSpec {
+                    id: "spot".to_owned(),
+                    kind: LightKindSpec::Spot { direction: 90.0, cone_angle: 45.0 },
+                    effect: LightEffectSpec::ColorCycle {
+                        colors: vec![[255, 200, 150, 255], [150, 200, 255, 255]],
+                        speed: 0.5,
+                    },
+                    ..LightSpec::new("spot")
+                },
+                LightSpec {
+                    id: "sun".to_owned(),
+                    kind: LightKindSpec::Directional { dx: 0.3, dy: -1.0 },
+                    ..LightSpec::new("sun")
+                },
+            ];
+            scene.post_fx.bloom_enabled = true;
+            scene.post_fx.mode = PostFxMode::NightMode {
+                bloom_threshold: 0.75,
+                bloom_strength: 0.5,
+                vignette_strength: 0.6,
+                vignette_radius: 0.7,
+                vignette_softness: 0.3,
+                ca_intensity: 1.5,
+            };
+            if let Some(obj) = scene.objects.first_mut() {
+                obj.unlit = true;
+                obj.casts_shadow = true;
+            }
+        }
+        app.show_lighting_window = true;
+
         // Give the scene an event carrying a background-transition action so the
         // event builder's structured background editor is exercised too.
         {
@@ -6783,6 +7285,9 @@ mod tests {
                 egui::Window::new("events_test").show(ctx, |ui| {
                     app.events_editor(ui);
                 });
+                egui::Window::new("lighting_test").show(ctx, |ui| {
+                    app.lighting_window_panel(ui);
+                });
             });
         }
 
@@ -6791,6 +7296,9 @@ mod tests {
         assert!(scene.background.enabled);
         assert_eq!(scene.background.layers.len(), 6);
         assert!(scene.camera.follow_enabled);
+        assert!(scene.lighting.enabled);
+        assert_eq!(scene.lighting.lights.len(), 3);
+        assert!(scene.post_fx.bloom_enabled);
     }
 
     #[test]

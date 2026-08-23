@@ -64,6 +64,12 @@ pub fn scene_extra_use_lines(scene: &crate::core::project::SceneDocument) -> Str
         names.sort_unstable();
         use_lines.push(format!("use quartz::plugin::background::{{{}}};\n", names.join(", ")));
     }
+    // SYNFUL: the lighting types (LightSource/LightType/LightEffect/
+    // LightingConfig/AmbientLight) ARE in quartz::prelude, but BloomSettings is
+    // only re-exported at the crate root, so it needs its own use line.
+    if scene.post_fx.bloom_enabled {
+        use_lines.push("use quartz::BloomSettings;\n".to_owned());
+    }
     use_lines.sort();
     use_lines.dedup();
     use_lines.concat()
@@ -126,6 +132,199 @@ fn sanitize_ident(raw: &str) -> String {
         s.insert(0, '_');
     }
     s
+}
+
+// ── SYNFUL lighting + post-processing emission ──────────────────────────────
+//
+// These target the synful fork's `quartz::lighting` module and the GPU
+// post-processing methods on Canvas. Official quartz has neither, which is why
+// this emission exists only in the synful copy of the forge.
+
+/// `Color(r, g, b, a)` — quartz's Color is a 4-field tuple struct, NOT
+/// `Color::rgb(..)` / `Color::rgba(..)` (those constructors do not exist).
+fn color_lit(c: [u8; 4]) -> String {
+    format!("Color({}, {}, {}, {})", c[0], c[1], c[2], c[3])
+}
+
+/// The `LightEffect::..` expression for a light, if it has one.
+fn light_effect_expr(effect: &crate::core::project::LightEffectSpec) -> Option<String> {
+    use crate::core::project::LightEffectSpec as E;
+    Some(match effect {
+        E::None => return None,
+        E::Pulse { min_intensity, max_intensity, speed } => format!(
+            "LightEffect::Pulse {{ min_intensity: {}, max_intensity: {}, speed: {} }}",
+            f32_lit(*min_intensity),
+            f32_lit(*max_intensity),
+            f32_lit(*speed)
+        ),
+        E::Flicker { base_intensity, variance } => format!(
+            "LightEffect::Flicker {{ base_intensity: {}, variance: {} }}",
+            f32_lit(*base_intensity),
+            f32_lit(*variance)
+        ),
+        E::ColorCycle { colors, speed } => {
+            let list = colors.iter().map(|c| color_lit(*c)).collect::<Vec<_>>().join(", ");
+            format!(
+                "LightEffect::ColorCycle {{ colors: vec![{}], speed: {} }}",
+                list,
+                f32_lit(*speed)
+            )
+        }
+        E::FadeIn { target_intensity, duration } => format!(
+            "LightEffect::FadeIn {{ target_intensity: {}, duration: {} }}",
+            f32_lit(*target_intensity),
+            f32_lit(*duration)
+        ),
+        E::FadeOut { duration } => {
+            format!("LightEffect::FadeOut {{ duration: {} }}", f32_lit(*duration))
+        }
+    })
+}
+
+/// Scene lighting: `enable_lighting` + one `add_light` per light, plus
+/// attachments. Emitted into setup_scene AFTER objects exist, because
+/// `attach_light` binds to an object by name.
+pub fn scene_lighting_lines(scene: &crate::core::project::SceneDocument) -> String {
+    use crate::core::project::LightKindSpec as K;
+    let lt = &scene.lighting;
+    if !lt.enabled {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "    canvas.enable_lighting(LightingConfig {{ ambient: AmbientLight {{ color: {}, strength: {} }}, max_lights: {} }});\n",
+        color_lit(lt.ambient_color),
+        f32_lit(lt.ambient_strength),
+        lt.max_lights
+    ));
+
+    for light in &lt.lights {
+        // LightSource::new(id, position, color, radius, intensity) — the
+        // constructor covers the common fields; the rest are set after.
+        let mut expr = format!(
+            "LightSource::new(\"{}\", ({}, {}), {}, {}, {})",
+            light.id,
+            f32_lit(light.x),
+            f32_lit(light.y),
+            color_lit(light.color),
+            f32_lit(light.radius),
+            f32_lit(light.intensity)
+        );
+        // `new` defaults casts_shadows to true — only emit when it differs.
+        if !light.casts_shadows {
+            expr.push_str(".with_shadows(false)");
+        }
+        if let Some(fx) = light_effect_expr(&light.effect) {
+            expr.push_str(&format!(".with_effect({fx})"));
+        }
+
+        // `light_type` and `enabled` are public fields with no builder methods.
+        // They CANNOT be set with functional struct-update syntax
+        // (`LightSource { light_type: .., ..LightSource::new(..) }`) because
+        // LightSource also has a private `effect_time` field, and struct-update
+        // requires every field to be visible (E0451). So emit a block that
+        // assigns the fields on a local instead.
+        let mut field_sets = String::new();
+        match &light.kind {
+            K::Point => {}
+            K::Spot { direction, cone_angle } => field_sets.push_str(&format!(
+                "        __light.light_type = LightType::Spot {{ direction: {}, cone_angle: {} }};\n",
+                f32_lit(*direction),
+                f32_lit(*cone_angle)
+            )),
+            K::Directional { dx, dy } => field_sets.push_str(&format!(
+                "        __light.light_type = LightType::Directional {{ direction: ({}, {}) }};\n",
+                f32_lit(*dx),
+                f32_lit(*dy)
+            )),
+        }
+        if !light.enabled {
+            field_sets.push_str("        __light.enabled = false;\n");
+        }
+
+        if field_sets.is_empty() {
+            out.push_str(&format!("    canvas.add_light({expr});\n"));
+        } else {
+            out.push_str("    canvas.add_light({\n");
+            out.push_str(&format!("        let mut __light = {expr};\n"));
+            out.push_str(&field_sets);
+            out.push_str("        __light\n");
+            out.push_str("    });\n");
+        }
+    }
+
+    for light in &lt.lights {
+        if light.attach_object.trim().is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "    canvas.attach_light(\"{}\", \"{}\", ({}, {}));\n",
+            light.id,
+            light.attach_object.trim(),
+            f32_lit(light.attach_offset_x),
+            f32_lit(light.attach_offset_y)
+        ));
+    }
+    out
+}
+
+/// GPU post-processing: bloom pass + the single active post override.
+pub fn scene_post_fx_lines(scene: &crate::core::project::SceneDocument) -> String {
+    use crate::core::project::PostFxMode as M;
+    let fx = &scene.post_fx;
+    let mut out = String::new();
+    if fx.bloom_enabled {
+        out.push_str(&format!(
+            "    canvas.enable_bloom(BloomSettings {{ threshold: {}, strength: {} }});\n",
+            f32_lit(fx.bloom_threshold),
+            f32_lit(fx.bloom_strength)
+        ));
+    }
+    match &fx.mode {
+        M::None => {}
+        M::Vignette { strength, radius, softness } => out.push_str(&format!(
+            "    canvas.enable_vignette({}, {}, {});\n",
+            f32_lit(*strength),
+            f32_lit(*radius),
+            f32_lit(*softness)
+        )),
+        M::ChromaticAberration { intensity } => out.push_str(&format!(
+            "    canvas.enable_chromatic_aberration({});\n",
+            f32_lit(*intensity)
+        )),
+        M::NightMode {
+            bloom_threshold,
+            bloom_strength,
+            vignette_strength,
+            vignette_radius,
+            vignette_softness,
+            ca_intensity,
+        } => out.push_str(&format!(
+            "    canvas.enable_night_mode_shader({}, {}, {}, {}, {}, {});\n",
+            f32_lit(*bloom_threshold),
+            f32_lit(*bloom_strength),
+            f32_lit(*vignette_strength),
+            f32_lit(*vignette_radius),
+            f32_lit(*vignette_softness),
+            f32_lit(*ca_intensity)
+        )),
+        M::Custom { shader_id, label, wgsl, params } => {
+            // The shader must be registered before it can be activated.
+            out.push_str(&format!(
+                "    canvas.register_shader_source(\"{}\", \"{}\", r#\"{}\"#);\n",
+                shader_id,
+                label,
+                wgsl
+            ));
+            let params_lit =
+                params.iter().map(|p| f32_lit(*p)).collect::<Vec<_>>().join(", ");
+            out.push_str(&format!(
+                "    canvas.set_post_override(\"{}\", vec![{}]);\n",
+                shader_id, params_lit
+            ));
+        }
+    }
+    out
 }
 
 /// Camera follow + initial zoom via `canvas.camera_mut()`.
@@ -359,7 +558,8 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
             f32_lit(obj.advanced.rotation_resistance)
         ));
         out.push_str(&format!(
-            "        .pivot({}, {})\n",
+            // SYNFUL: `with_pivot`, not `pivot` — the forks diverge here.
+            "        .with_pivot({}, {})\n",
             f32_lit(obj.advanced.pivot_x), f32_lit(obj.advanced.pivot_y)
         ));
         out.push_str(&format!(
@@ -388,6 +588,7 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
         }
         out.push_str("        .finish();\n");
         append_post_build_lines(&mut out, &obj.id, &obj.advanced);
+        append_synful_lighting_lines(&mut out, obj);
         if obj.visual_asset_mode == ObjectVisualAssetMode::AnimatedSprite {
             if let Some(bytes_expr) = asset_include_expr(&obj.visual_asset_path) {
                 out.push_str(&format!(
@@ -446,6 +647,9 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
     out.push_str(&scene_camera_lines(scene));
     // Composited full-screen background object (renders; unlike BackgroundPlugin).
     out.push_str(&scene_background_lines(scene));
+    // SYNFUL: lighting + post-fx, after objects exist (attach_light binds by name).
+    out.push_str(&scene_lighting_lines(scene));
+    out.push_str(&scene_post_fx_lines(scene));
 
     out.push_str("}\n\n");
 
@@ -480,7 +684,7 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
 /// never mutated after the chain — demote those to `let` so generated files
 /// compile without unused_mut warnings. A binding keeps `mut` when any later
 /// line starts a `<id>.method(...)` mutation.
-fn demote_unneeded_muts(source: String) -> String {
+pub fn demote_unneeded_muts(source: String) -> String {
     let mut out_lines: Vec<String> = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
     for (idx, line) in lines.iter().enumerate() {
@@ -629,7 +833,9 @@ pub fn object_registration_body(object: &crate::core::quartz_domain::QuartzObjec
         f32_lit(object.advanced.rotation_resistance)
     ));
     out.push_str(&format!(
-        "        .pivot({}, {})\n",
+        // SYNFUL: the builder method is `with_pivot`, not `pivot` (official
+        // quartz renamed it; the forks diverge here).
+        "        .with_pivot({}, {})\n",
         f32_lit(object.advanced.pivot_x), f32_lit(object.advanced.pivot_y)
     ));
     out.push_str(&format!(
@@ -658,6 +864,7 @@ pub fn object_registration_body(object: &crate::core::quartz_domain::QuartzObjec
     }
     out.push_str("        .finish();\n");
     append_post_build_lines(&mut out, &object.id, &object.advanced);
+    append_synful_lighting_lines(&mut out, object);
     if object.visual_asset_mode == ObjectVisualAssetMode::None
         && object
             .tags
@@ -719,7 +926,9 @@ pub fn object_build_body(object: &crate::core::quartz_domain::QuartzObjectBluepr
         f32_lit(object.advanced.rotation_resistance)
     ));
     out.push_str(&format!(
-        "        .pivot({}, {})\n",
+        // SYNFUL: the builder method is `with_pivot`, not `pivot` (official
+        // quartz renamed it; the forks diverge here).
+        "        .with_pivot({}, {})\n",
         f32_lit(object.advanced.pivot_x), f32_lit(object.advanced.pivot_y)
     ));
     out.push_str(&format!(
@@ -748,6 +957,7 @@ pub fn object_build_body(object: &crate::core::quartz_domain::QuartzObjectBluepr
     }
     out.push_str("        .finish();\n");
     append_post_build_lines(&mut out, &object.id, &object.advanced);
+    append_synful_lighting_lines(&mut out, object);
     if object.visual_asset_mode == ObjectVisualAssetMode::None
         && object.tags.iter().any(|tag| tag.eq_ignore_ascii_case("player"))
         && object.advanced.collision_mode == QuartzObjectCollisionMode::SolidCircle
@@ -810,7 +1020,9 @@ pub fn spawn_template_body(object: &crate::core::quartz_domain::QuartzObjectBlue
         f32_lit(object.advanced.rotation_resistance)
     ));
     out.push_str(&format!(
-        "        .pivot({}, {})\n",
+        // SYNFUL: the builder method is `with_pivot`, not `pivot` (official
+        // quartz renamed it; the forks diverge here).
+        "        .with_pivot({}, {})\n",
         f32_lit(object.advanced.pivot_x), f32_lit(object.advanced.pivot_y)
     ));
     out.push_str(&format!(
@@ -840,6 +1052,7 @@ pub fn spawn_template_body(object: &crate::core::quartz_domain::QuartzObjectBlue
     // Build and return — no canvas.add_game_object() for templates
     out.push_str("        .finish();\n");
     append_post_build_lines(&mut out, &object.id, &object.advanced);
+    append_synful_lighting_lines(&mut out, object);
     if object.visual_asset_mode == ObjectVisualAssetMode::AnimatedSprite {
         if let Some(bytes_expr) = asset_include_expr(&object.visual_asset_path) {
             out.push_str(&format!(
@@ -1014,6 +1227,25 @@ fn append_camera_space_builder_lines(
     // lighting-opt-out API despite older guidance claiming one). The
     // `advanced.unlit` field is retained for forward-compat but intentionally
     // emits nothing — emitting `.unlit()` fails to compile against the engine.
+}
+
+/// SYNFUL: per-object lighting flags.
+///
+/// Both are public FIELDS on `GameObject`, not builder methods — there is no
+/// `.unlit()` (it is `obj.unlit = true;`). `.casts_shadow()` does exist as a
+/// builder method, but `shadow_caster` is also a public field, so emitting both
+/// as post-build assignments keeps this to one helper and works identically for
+/// pool templates (which are returned, not added to the canvas).
+fn append_synful_lighting_lines(
+    out: &mut String,
+    object: &crate::core::quartz_domain::QuartzObjectBlueprint,
+) {
+    if object.unlit {
+        out.push_str(&format!("    {}.unlit = true;\n", object.id));
+    }
+    if object.casts_shadow {
+        out.push_str(&format!("    {}.shadow_caster = true;\n", object.id));
+    }
 }
 
 fn append_post_build_lines(

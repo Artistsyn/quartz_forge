@@ -3,9 +3,13 @@
 //!
 //! This binary writes `<workspace>/forge_verify_game` — a complete project
 //! exercising the authoring surface end to end: plugin registration, a pooled
-//! spawn-only template, world objects with physics, and events covering the
+//! spawn-only template, world objects with physics, events covering the
 //! action-parity pass (Teleport, momentum, PlaySound, SetText, CameraShake,
-//! conditionals, vars). It deliberately does NOT compile the result itself:
+//! conditionals, vars), and — in this SYNFUL fork — the real-time lighting +
+//! GPU post-fx surface (every LightType, every LightEffect, attachment, a
+//! disabled/shadowless light, night-mode post-fx + bloom, and per-object
+//! unlit/casts_shadow flags). It deliberately does NOT compile the result
+//! itself:
 //!
 //! ```powershell
 //! cargo run --manifest-path quartz_forge/Cargo.toml --bin qf_verify_generated
@@ -20,6 +24,7 @@ use quartz_forge::core::project::{
     BackgroundLayerSpec, BackgroundResizeFilter, BackgroundSpec, CameraSpec, NamedBackground,
     PluginRegistration,
     PoolBlueprint,
+    LightEffectSpec, LightKindSpec, LightSpec, LightingSpec, PostFxMode, PostFxSpec,
 };
 use quartz_forge::core::quartz_domain::{
     QuartzAction, QuartzCondition, QuartzEventBinding, QuartzEventKind, QuartzExpr,
@@ -82,6 +87,10 @@ fn main() -> Result<()> {
         ground.h = 160.0;
         ground.layer = 1;
         ground.tags = vec!["terrain".to_owned()];
+        // SYNFUL: terrain occludes light; it is also 3840 wide, and objects that
+        // large get tinted uniformly from their center, so mark it unlit too.
+        ground.casts_shadow = true;
+        ground.unlit = true;
         scene.objects.push(ground);
 
         // Pooled bullet template: spawn-only, manually controlled (gravity 0).
@@ -165,6 +174,95 @@ fn main() -> Result<()> {
                     seed: 0x1234,
                 },
             ],
+        };
+
+        // ── SYNFUL lighting: every LightType and every LightEffect ───────────
+        // The point is to prove each emitted variant compiles against the real
+        // synful engine, not to make a scene that looks good.
+        scene.lighting = LightingSpec {
+            enabled: true,
+            ambient_color: [10, 10, 25, 255],
+            ambient_strength: 0.06,
+            max_lights: 64,
+            lights: vec![
+                // Attached, shadow-casting, flickering torch (follows the player).
+                LightSpec {
+                    id: "torch".to_owned(),
+                    kind: LightKindSpec::Point,
+                    x: 400.0,
+                    y: 300.0,
+                    color: [255, 180, 80, 255],
+                    radius: 300.0,
+                    intensity: 0.8,
+                    enabled: true,
+                    casts_shadows: true,
+                    effect: LightEffectSpec::Flicker { base_intensity: 0.8, variance: 0.2 },
+                    attach_object: "player".to_owned(),
+                    attach_offset_x: 0.0,
+                    attach_offset_y: -16.0,
+                },
+                // Spot + pulse + shadows OFF (exercises .with_shadows(false)).
+                LightSpec {
+                    id: "spot".to_owned(),
+                    kind: LightKindSpec::Spot { direction: 90.0, cone_angle: 45.0 },
+                    x: 800.0,
+                    y: 200.0,
+                    color: [255, 255, 240, 255],
+                    radius: 500.0,
+                    intensity: 1.0,
+                    enabled: true,
+                    casts_shadows: false,
+                    effect: LightEffectSpec::Pulse {
+                        min_intensity: 0.4,
+                        max_intensity: 1.0,
+                        speed: 2.0,
+                    },
+                    ..LightSpec::new("spot")
+                },
+                // Directional + disabled (exercises the struct-update path for
+                // both light_type and enabled: false).
+                LightSpec {
+                    id: "sun".to_owned(),
+                    kind: LightKindSpec::Directional { dx: 0.3, dy: -1.0 },
+                    x: 0.0,
+                    y: 0.0,
+                    color: [255, 248, 220, 255],
+                    radius: 4000.0,
+                    intensity: 0.6,
+                    enabled: false,
+                    casts_shadows: true,
+                    effect: LightEffectSpec::ColorCycle {
+                        colors: vec![[255, 200, 150, 255], [150, 200, 255, 255]],
+                        speed: 0.5,
+                    },
+                    ..LightSpec::new("sun")
+                },
+                LightSpec {
+                    id: "fade_in".to_owned(),
+                    effect: LightEffectSpec::FadeIn { target_intensity: 1.0, duration: 2.0 },
+                    ..LightSpec::new("fade_in")
+                },
+                LightSpec {
+                    id: "fade_out".to_owned(),
+                    effect: LightEffectSpec::FadeOut { duration: 1.5 },
+                    ..LightSpec::new("fade_out")
+                },
+            ],
+        };
+
+        // ── SYNFUL post-fx: bloom + night mode (bloom is a separate pass) ────
+        scene.post_fx = PostFxSpec {
+            bloom_enabled: true,
+            bloom_threshold: 0.8,
+            bloom_strength: 0.4,
+            mode: PostFxMode::NightMode {
+                bloom_threshold: 0.75,
+                bloom_strength: 0.5,
+                vignette_strength: 0.6,
+                vignette_radius: 0.7,
+                vignette_softness: 0.3,
+                ca_intensity: 1.5,
+            },
         };
 
         // ── Events exercising the parity-pass actions ────────────────────────
