@@ -389,6 +389,12 @@ fn parse_object_followup_expr(
                     "shadow_caster" => {
                         object.casts_shadow = expr_to_bool(&assign.right).unwrap_or(false);
                     }
+                    "shadow_circle" if expr_to_bool(&assign.right).ok() == Some(true) => {
+                        object.shadow_shape = crate::core::quartz_domain::ShadowShapeSpec::Circle;
+                    }
+                    "shadow_outline" if expr_to_bool(&assign.right).ok() == Some(true) => {
+                        object.shadow_shape = crate::core::quartz_domain::ShadowShapeSpec::Outline;
+                    }
                     _ => {}
                 }
             }
@@ -397,6 +403,25 @@ fn parse_object_followup_expr(
 
     if let Expr::MethodCall(call) = expr {
         let method = call.method.to_string();
+        if method == "set_effect" {
+            if let Some(var_name) = expr_ident_name(&call.receiver)
+                && let Some(object) = built.get_mut(&var_name)
+            {
+                let args: Vec<&Expr> = call.args.iter().collect();
+                object.effect = crate::core::object_effect::ObjectEffectSpec::from_call_args(
+                    &args, object.w, object.h,
+                );
+            }
+            return Ok(());
+        }
+        if method == "set_glow_bloom" {
+            if let Some(var_name) = expr_ident_name(&call.receiver)
+                && let Some(object) = built.get_mut(&var_name)
+            {
+                object.advanced.glow_bloom = call.args.first().and_then(|a| expr_to_bool(a).ok()).unwrap_or(true);
+            }
+            return Ok(());
+        }
         if method == "set_animation" {
             let Some(var_name) = expr_ident_name(&call.receiver) else {
                 return Ok(());
@@ -1502,11 +1527,12 @@ fn apply_builder_methods(
                     object.advanced.tint_rgba = rgba;
                 }
             }
-            "glow" if args.len() == 1 => {
+            "glow" | "glow_boxed" if args.len() == 1 => {
                 if let Some((rgba, width)) = parse_glow_config_expr(&args[0]) {
                     object.advanced.glow_enabled = true;
                     object.advanced.glow_rgba = rgba;
                     object.advanced.glow_width = width;
+                    object.advanced.glow_boxed = method == "glow_boxed";
                 }
             }
             "highlight" if args.len() == 1 => {
@@ -4682,7 +4708,29 @@ mod roundtrip_fixed_point_tests {
             ground.h = 160.0;
             ground.unlit = true;
             ground.casts_shadow = true;
+            ground.shadow_shape = crate::core::quartz_domain::ShadowShapeSpec::Outline;
+            ground.advanced.glow_enabled = true;
+            ground.advanced.glow_rgba = [90, 220, 255, 200];
+            ground.advanced.glow_width = 12.0;
+            ground.advanced.glow_boxed = true;
+            ground.advanced.glow_bloom = false;
+            ground.effect = Some(crate::core::object_effect::ObjectEffectSpec {
+                kind: crate::core::object_effect::EffectKind::EnergyTether,
+                rgb: [140, 215, 255],
+                scale: [1.0, 0.5],
+                amount: 0.95,
+                snap: Some(0.25),
+                ..Default::default()
+            });
             scene.objects.push(ground);
+
+            // A second shadow shape, so Circle round-trips as well as Outline.
+            let mut rock = QuartzObjectBlueprint::new("rock".to_owned(), "rock".to_owned());
+            rock.x = 600.0;
+            rock.y = 600.0;
+            rock.casts_shadow = true;
+            rock.shadow_shape = crate::core::quartz_domain::ShadowShapeSpec::Circle;
+            scene.objects.push(rock);
 
             scene.lighting = LightingSpec {
                 enabled: true,
@@ -4798,11 +4846,30 @@ mod roundtrip_fixed_point_tests {
             .expect("ground object must import");
         assert!(got_ground.unlit, "object unlit flag lost");
         assert!(got_ground.casts_shadow, "object casts_shadow flag lost");
+        assert_eq!(got_ground.shadow_shape, crate::core::quartz_domain::ShadowShapeSpec::Outline,
+            "outline shadow shape lost");
+        assert!(got_ground.advanced.glow_boxed, "glow_boxed lost");
+        assert!(!got_ground.advanced.glow_bloom, "glow_bloom(false) lost");
+        let fx = got_ground.effect.as_ref().expect("attached shader effect lost");
+        assert_eq!(fx.kind, crate::core::object_effect::EffectKind::EnergyTether);
+        assert_eq!(fx.rgb, [140, 215, 255]);
+        assert_eq!(fx.scale, [1.0, 0.5]);
+        assert_eq!(fx.snap, Some(0.25));
+        assert!(got.objects.iter().find(|o| o.id == "rock").unwrap().effect.is_none(),
+            "an object with no effect gained one");
+        let got_rock = got.objects.iter().find(|o| o.id == "rock").expect("rock object must import");
+        assert_eq!(got_rock.shadow_shape, crate::core::quartz_domain::ShadowShapeSpec::Circle,
+            "circle shadow shape lost");
+        assert!(got_rock.advanced.glow_bloom, "an object with no glow must keep the bloom default");
 
         // None of the lighting/post-fx/object-flag statements may reappear as
         // raw code in a setup_runtime custom block.
         let leaked = got.custom_code_blocks.iter().any(|b| {
-            b.code.contains("enable_lighting")
+            b.code.contains("shadow_outline")
+                || b.code.contains("shadow_circle")
+                || b.code.contains("set_glow_bloom")
+                || b.code.contains("set_effect")
+                || b.code.contains("enable_lighting")
                 || b.code.contains("add_light")
                 || b.code.contains("enable_night_mode_shader")
                 || b.code.contains(".unlit")
@@ -7594,9 +7661,16 @@ fn is_synful_lighting_stmt(stmt: &Stmt) -> bool {
 /// (`obj.unlit = true;` / `obj.shadow_caster = true;`) — imported onto the
 /// object blueprint, so consumed from the setup_runtime catch-all.
 fn is_synful_object_flag_stmt(stmt: &Stmt) -> bool {
+    // `obj.set_glow_bloom(..)` is a method, not a field, but it is imported
+    // onto the blueprint the same way.
+    if let Stmt::Expr(Expr::MethodCall(call), _) = stmt {
+        return (call.method == "set_glow_bloom" || call.method == "set_effect")
+            && expr_ident_name(&call.receiver).as_deref() != Some("canvas");
+    }
     let Stmt::Expr(Expr::Assign(assign), _) = stmt else { return false };
     let Expr::Field(field) = &*assign.left else { return false };
-    matches!(&field.member, Member::Named(m) if m == "unlit" || m == "shadow_caster")
+    matches!(&field.member, Member::Named(m)
+        if m == "unlit" || m == "shadow_caster" || m == "shadow_circle" || m == "shadow_outline")
 }
 
 /// True if a setup_scene statement is the camera-authoring block that

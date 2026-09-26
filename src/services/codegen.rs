@@ -1099,7 +1099,8 @@ fn append_advanced_builder_lines(
     }
     if advanced.glow_enabled {
         out.push_str(&format!(
-            "        .glow(GlowConfig {{ color: Color({}, {}, {}, {}), width: {} }})\n",
+            "        .{}(GlowConfig {{ color: Color({}, {}, {}, {}), width: {} }})\n",
+            if advanced.glow_boxed { "glow_boxed" } else { "glow" },
             advanced.glow_rgba[0],
             advanced.glow_rgba[1],
             advanced.glow_rgba[2],
@@ -1245,6 +1246,24 @@ fn append_synful_lighting_lines(
     }
     if object.casts_shadow {
         out.push_str(&format!("    {}.shadow_caster = true;\n", object.id));
+        match object.shadow_shape {
+            crate::core::quartz_domain::ShadowShapeSpec::Box => {}
+            crate::core::quartz_domain::ShadowShapeSpec::Circle => {
+                out.push_str(&format!("    {}.shadow_circle = true;\n", object.id));
+            }
+            crate::core::quartz_domain::ShadowShapeSpec::Outline => {
+                out.push_str(&format!("    {}.shadow_outline = true;\n", object.id));
+            }
+        }
+    }
+    if object.advanced.glow_enabled && !object.advanced.glow_bloom {
+        out.push_str(&format!("    {}.set_glow_bloom(false);\n", object.id));
+    }
+    // After the object is built, like the flags above: `set_effect` is a
+    // GameObject method, not a builder one, and this keeps pool templates
+    // (returned rather than added) on the same path.
+    if let Some(effect) = &object.effect {
+        out.push_str(&effect.set_effect_stmt(&object.id, object.w, object.h, f32_lit));
     }
 }
 
@@ -2414,7 +2433,7 @@ fn static_image_expr(object: &crate::core::quartz_domain::QuartzObjectBlueprint)
         if object.visual_asset_size_aware_cache {
             Some(format!(
                 "canvas.load_image_sized_cached(\"{}\", {}, {}, {})",
-                key, bytes_expr, object.w, object.h
+                key, bytes_expr, f32_lit(object.w), f32_lit(object.h)
             ))
         } else {
             Some(format!("canvas.load_image_cached(\"{}\", {})", key, bytes_expr))

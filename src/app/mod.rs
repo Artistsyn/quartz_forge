@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 
 mod editors;
+mod effect_editor;
 mod condition_editor;
 mod logic_events_editor;
 mod syntax_highlight;
@@ -2804,6 +2805,36 @@ impl QuartzForgeApp {
                 asset_quad,
                 asset_tint,
             );
+            // The attached shader effect, as its bounds: centred on the object
+            // and turned with it, which is how the engine places it. The
+            // shader itself only renders in-game.
+            if let Some(effect) = &obj.effect {
+                let size = egui::vec2(
+                    obj_rect.width() * effect.scale[0],
+                    obj_rect.height() * effect.scale[1],
+                );
+                let quad = Self::rotated_rect_points(
+                    obj_rect.center() - size * 0.5,
+                    size.x,
+                    size.y,
+                    0.5,
+                    0.5,
+                    Self::effective_rotation_deg(obj),
+                );
+                let [r, g, b] = effect.rgb;
+                painter.add(egui::Shape::convex_polygon(
+                    quad.to_vec(),
+                    Color32::from_rgba_unmultiplied(r, g, b, 36),
+                    Stroke::new(1.5, Color32::from_rgba_unmultiplied(r, g, b, 200)),
+                ));
+                painter.text(
+                    quad[0] + egui::vec2(3.0, 2.0),
+                    egui::Align2::LEFT_TOP,
+                    effect.kind.label(),
+                    egui::FontId::monospace(10.0),
+                    Color32::from_rgb(r, g, b),
+                );
+            }
             if is_spawn_ghost {
                 painter.text(
                     obj_rect.center_top() + egui::vec2(0.0, 4.0),
@@ -5979,6 +6010,19 @@ impl QuartzForgeApp {
                 .checkbox(&mut object.casts_shadow, "casts shadow")
                 .on_hover_text("This object occludes light and casts shadows (synful only).")
                 .changed();
+            if object.casts_shadow {
+                egui::ComboBox::from_id_salt(("shadow_shape", object.id.as_str()))
+                    .selected_text(object.shadow_shape.label())
+                    .show_ui(ui, |ui| {
+                        for shape in crate::core::quartz_domain::ShadowShapeSpec::ALL {
+                            changed |= ui
+                                .selectable_value(&mut object.shadow_shape, shape, shape.label())
+                                .changed();
+                        }
+                    })
+                    .response
+                    .on_hover_text("Box: the rectangle. Circle: the inscribed disc. Pixel outline: the sprite's own traced silhouette.");
+            }
         });
         ui.add_enabled_ui(!object.lock_transform, |ui| {
             changed |= ui.add(Slider::new(&mut object.x, -8000.0..=8000.0).text("x")).changed();
@@ -6232,7 +6276,16 @@ impl QuartzForgeApp {
                 changed |= ui
                     .add(Slider::new(&mut object.advanced.glow_width, 0.0..=64.0).text("glow width"))
                     .changed();
+                changed |= ui
+                    .checkbox(&mut object.advanced.glow_boxed, "boxed")
+                    .on_hover_text("Stroke the glow as a rectangle (UI frames). Off: the glow follows the sprite's visible pixels.")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut object.advanced.glow_bloom, "bloom")
+                    .on_hover_text("The glow is light: drawn unlit and bloomed. Off: a flat highlight.")
+                    .changed();
             }
+            changed |= effect_editor::object_effect_editor(ui, object);
         }
 
         if object.visible.collision {

@@ -93,6 +93,33 @@ fn main() -> Result<()> {
         ground.unlit = true;
         scene.objects.push(ground);
 
+        // SYNFUL: one object per authorable shader effect, every parameter set
+        // to a non-default value, so every `Effect::..` variant codegen can
+        // emit has to compile against the real enum.
+        for (i, kind) in quartz_forge::core::object_effect::EffectKind::ALL.into_iter().enumerate() {
+            use quartz_forge::core::object_effect::*;
+            let id = format!("fx_{}", kind.variant().to_lowercase());
+            let mut o = QuartzObjectBlueprint::new(id.clone(), id);
+            o.x = 200.0 + i as f32 * 150.0;
+            o.y = 400.0;
+            o.w = 120.0;
+            o.h = 40.0;
+            o.effect = Some(ObjectEffectSpec {
+                kind,
+                rgb: [255, 140, 41],
+                scale: [1.5, 1.25],
+                amount: 0.8,
+                progress: 0.4,
+                snap: Some(0.5),
+                edge: ScreenEdgeSpec::Left,
+                mode: MarkerModeSpec::WindingUp,
+                side: ImpactSideSpec::Taken,
+                levels: [0.2, 0.4, 0.6, 0.8],
+                flags: vec!["FIRE".to_owned(), "PULSE_GLOW".to_owned()],
+            });
+            scene.objects.push(o);
+        }
+
         // Pooled bullet template: spawn-only, manually controlled (gravity 0).
         let mut bullet =
             QuartzObjectBlueprint::new("bullet".to_owned(), "bullet".to_owned());

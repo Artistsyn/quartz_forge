@@ -204,6 +204,16 @@ pub struct QuartzObjectBlueprint {
     /// Emits the `.casts_shadow()` builder method.
     #[serde(default)]
     pub casts_shadow: bool,
+    /// SYNFUL-ONLY: the shape of that shadow. Box is the object's rectangle;
+    /// Circle its inscribed disc; Outline the sprite's own traced pixel
+    /// outline (`obj.shadow_outline`), concavities kept.
+    #[serde(default)]
+    pub shadow_shape: ShadowShapeSpec,
+    /// A typed shader effect attached to this object (`obj.set_effect`).
+    /// One per object — the engine has one effect slot. See
+    /// `core::object_effect`.
+    #[serde(default)]
+    pub effect: Option<crate::core::object_effect::ObjectEffectSpec>,
     pub advanced: ObjectAdvancedParams,
     pub visible: ObjectParamVisibility,
 }
@@ -234,6 +244,8 @@ impl QuartzObjectBlueprint {
             spawn_only: false,
             unlit: false,
             casts_shadow: false,
+            shadow_shape: ShadowShapeSpec::default(),
+            effect: None,
             advanced: ObjectAdvancedParams::default(),
             visible: ObjectParamVisibility::default(),
         }
@@ -353,6 +365,14 @@ pub struct ObjectAdvancedParams {
     pub glow_rgba: [u8; 4],
     #[serde(default = "default_glow_width")]
     pub glow_width: f32,
+    /// Stroke the glow as a hard rectangle (`.glow_boxed`) — for UI frames.
+    /// Otherwise the glow follows the sprite's visible pixels.
+    #[serde(default)]
+    pub glow_boxed: bool,
+    /// Whether the glow blooms (engine default). False emits
+    /// `obj.set_glow_bloom(false)` for a flat highlight.
+    #[serde(default = "glow_bloom_default")]
+    pub glow_bloom: bool,
     pub collision_layer: u32,
     pub collision_mask: u32,
     #[serde(default)]
@@ -464,6 +484,8 @@ impl Default for ObjectAdvancedParams {
             glow_enabled: false,
             glow_rgba: default_effect_rgba(),
             glow_width: default_glow_width(),
+            glow_boxed: false,
+            glow_bloom: true,
             collision_layer: 1,
             collision_mask: 1,
             is_platform: false,
@@ -2059,4 +2081,26 @@ impl QuartzTargetRef {
 pub enum QuartzLocationRef {
     At { x: f32, y: f32 },
     AtTarget(QuartzTargetRef),
+}
+
+fn glow_bloom_default() -> bool { true }
+
+/// The shape an object's shadow is cast in. See `QuartzObjectBlueprint::shadow_shape`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ShadowShapeSpec {
+    #[default]
+    Box,
+    Circle,
+    Outline,
+}
+
+impl ShadowShapeSpec {
+    pub const ALL: [ShadowShapeSpec; 3] = [ShadowShapeSpec::Box, ShadowShapeSpec::Circle, ShadowShapeSpec::Outline];
+    pub fn label(self) -> &'static str {
+        match self {
+            ShadowShapeSpec::Box => "box",
+            ShadowShapeSpec::Circle => "circle",
+            ShadowShapeSpec::Outline => "pixel outline",
+        }
+    }
 }
