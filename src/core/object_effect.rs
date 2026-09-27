@@ -684,8 +684,11 @@ mod tests {
         let engine = engine_variants();
         assert!(engine.len() >= 13, "failed to read the engine enum: {engine:?}");
         // OutlineState takes the outline field quartz builds from the sprite
-        // at runtime; there is nothing to author.
-        let not_authorable = ["Image", "AnimatedImage", "OutlineState"];
+        // at runtime; there is nothing to author. TiledStrip repeats an image
+        // (a rope style's tile), and effects cannot name an image yet.
+        // SolarFront is a sweeping screen effect whose aspect comes from the
+        // quad the caller sizes each frame, not from an object.
+        let not_authorable = ["Image", "AnimatedImage", "OutlineState", "TiledStrip", "SolarFront"];
         for (name, fields) in &engine {
             if not_authorable.contains(&name.as_str()) {
                 continue;
