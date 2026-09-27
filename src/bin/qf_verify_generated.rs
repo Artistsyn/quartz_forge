@@ -111,11 +111,18 @@ fn main() -> Result<()> {
                 amount: 0.8,
                 progress: 0.4,
                 snap: Some(0.5),
+                hot: true,
                 edge: ScreenEdgeSpec::Left,
                 mode: MarkerModeSpec::WindingUp,
                 side: ImpactSideSpec::Taken,
                 levels: [0.2, 0.4, 0.6, 0.8],
                 flags: vec!["FIRE".to_owned(), "PULSE_GLOW".to_owned()],
+                arc_stage: ArcStageSpec::Flight,
+                beam_stage: BeamStageSpec::Live,
+                bulge: 0.45,
+                thickness: 0.1,
+                flip: true,
+                sweep: Some(true),
             });
             scene.objects.push(o);
         }

@@ -47,10 +47,15 @@ pub enum EffectKind {
     Impact,
     EnergyTether,
     ThrustPlume,
+    GravityLens,
+    EnergyWall,
+    DangerZone,
+    ProminenceArc,
+    PulsarBeam,
 }
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 13] = [
+    pub const ALL: [EffectKind; 18] = [
         EffectKind::Animated,
         EffectKind::EnergyDome,
         EffectKind::SegmentShield,
@@ -64,6 +69,11 @@ impl EffectKind {
         EffectKind::Impact,
         EffectKind::EnergyTether,
         EffectKind::ThrustPlume,
+        EffectKind::GravityLens,
+        EffectKind::EnergyWall,
+        EffectKind::DangerZone,
+        EffectKind::ProminenceArc,
+        EffectKind::PulsarBeam,
     ];
 
     /// The engine variant name.
@@ -82,6 +92,11 @@ impl EffectKind {
             EffectKind::Impact => "Impact",
             EffectKind::EnergyTether => "EnergyTether",
             EffectKind::ThrustPlume => "ThrustPlume",
+            EffectKind::GravityLens => "GravityLens",
+            EffectKind::EnergyWall => "EnergyWall",
+            EffectKind::DangerZone => "DangerZone",
+            EffectKind::ProminenceArc => "ProminenceArc",
+            EffectKind::PulsarBeam => "PulsarBeam",
         }
     }
 
@@ -105,6 +120,11 @@ impl EffectKind {
             EffectKind::Impact => "impact",
             EffectKind::EnergyTether => "energy tether",
             EffectKind::ThrustPlume => "thrust plume",
+            EffectKind::GravityLens => "gravity lens",
+            EffectKind::EnergyWall => "energy wall",
+            EffectKind::DangerZone => "danger zone",
+            EffectKind::ProminenceArc => "prominence arc",
+            EffectKind::PulsarBeam => "pulsar beam",
         }
     }
 
@@ -112,7 +132,7 @@ impl EffectKind {
     pub fn amount_field(self) -> &'static str {
         match self {
             EffectKind::Animated => "alpha",
-            EffectKind::EnergyDome => "strength",
+            EffectKind::EnergyDome | EffectKind::GravityLens => "strength",
             EffectKind::SegmentShield => "energy",
             EffectKind::ResonanceWave => "amplitude",
             EffectKind::BeatField => "pulse",
@@ -123,7 +143,11 @@ impl EffectKind {
             | EffectKind::EqArcs
             | EffectKind::StateMarker
             | EffectKind::StrikeLane
-            | EffectKind::EnergyTether => "intensity",
+            | EffectKind::EnergyTether
+            | EffectKind::EnergyWall
+            | EffectKind::DangerZone
+            | EffectKind::ProminenceArc
+            | EffectKind::PulsarBeam => "intensity",
         }
     }
 
@@ -134,13 +158,17 @@ impl EffectKind {
             EffectKind::BeatField => &["pulse", "edge"],
             EffectKind::EqArcs => &["intensity", "levels"],
             EffectKind::StateMarker => &["mode", "intensity"],
-            EffectKind::StrikeLane => &["intensity", "progress"],
+            EffectKind::StrikeLane | EffectKind::DangerZone => &["intensity", "progress"],
             EffectKind::Impact => &["age", "side"],
-            EffectKind::EnergyTether => &["intensity", "snap"],
+            EffectKind::EnergyTether => &["intensity", "snap", "hot"],
+            EffectKind::ProminenceArc => {
+                &["stage", "intensity", "progress", "bulge", "thickness", "aspect", "flip"]
+            }
+            EffectKind::PulsarBeam => &["stage", "intensity", "progress", "sweep"],
             k => std::slice::from_ref(match k {
-                EffectKind::EnergyDome => &"strength",
+                EffectKind::EnergyDome | EffectKind::GravityLens => &"strength",
                 EffectKind::SegmentShield => &"energy",
-                EffectKind::SonicRing => &"intensity",
+                EffectKind::SonicRing | EffectKind::EnergyWall => &"intensity",
                 EffectKind::ResonanceWave => &"amplitude",
                 EffectKind::BeatNode => &"near",
                 EffectKind::ThrustPlume => &"thrust",
@@ -156,7 +184,52 @@ impl EffectKind {
     /// Strips run along the object's local +x, source at the left edge — the
     /// object's rotation aims them. Shown as a hint in the editor.
     pub fn is_strip(self) -> bool {
-        matches!(self, EffectKind::StrikeLane | EffectKind::EnergyTether | EffectKind::ThrustPlume)
+        matches!(
+            self,
+            EffectKind::StrikeLane
+                | EffectKind::EnergyTether
+                | EffectKind::ThrustPlume
+                | EffectKind::ProminenceArc
+                | EffectKind::PulsarBeam
+        )
+    }
+}
+
+/// `ArcStage` mirror.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArcStageSpec {
+    #[default]
+    Path,
+    Flight,
+    Burn,
+}
+
+impl ArcStageSpec {
+    pub const ALL: [ArcStageSpec; 3] = [ArcStageSpec::Path, ArcStageSpec::Flight, ArcStageSpec::Burn];
+    pub fn name(self) -> &'static str {
+        match self {
+            ArcStageSpec::Path => "Path",
+            ArcStageSpec::Flight => "Flight",
+            ArcStageSpec::Burn => "Burn",
+        }
+    }
+}
+
+/// `BeamStage` mirror.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BeamStageSpec {
+    #[default]
+    Charging,
+    Live,
+}
+
+impl BeamStageSpec {
+    pub const ALL: [BeamStageSpec; 2] = [BeamStageSpec::Charging, BeamStageSpec::Live];
+    pub fn name(self) -> &'static str {
+        match self {
+            BeamStageSpec::Charging => "Charging",
+            BeamStageSpec::Live => "Live",
+        }
     }
 }
 
@@ -236,6 +309,8 @@ fn default_scale() -> [f32; 2] { [1.0, 1.0] }
 fn default_rgb() -> [u8; 3] { [140, 215, 255] }
 fn default_levels() -> [f32; 4] { [1.0; 4] }
 fn default_flags() -> Vec<String> { vec!["ELECTRICITY".to_owned()] }
+fn default_bulge() -> f32 { 0.5 }
+fn default_thickness() -> f32 { 0.15 }
 
 /// One object's attached effect. See the module docs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -256,6 +331,9 @@ pub struct ObjectEffectSpec {
     /// EnergyTether: `Some(progress)` while snapping.
     #[serde(default)]
     pub snap: Option<f32>,
+    /// EnergyTether: wrapped in a crackling weave (a line that hurts).
+    #[serde(default)]
+    pub hot: bool,
     #[serde(default)]
     pub edge: ScreenEdgeSpec,
     #[serde(default)]
@@ -268,6 +346,25 @@ pub struct ObjectEffectSpec {
     /// Animated: `VFX_FLAG_NAMES` entries.
     #[serde(default = "default_flags")]
     pub flags: Vec<String>,
+    /// ProminenceArc: which moment of the throw.
+    #[serde(default)]
+    pub arc_stage: ArcStageSpec,
+    /// PulsarBeam: charging or live.
+    #[serde(default)]
+    pub beam_stage: BeamStageSpec,
+    /// ProminenceArc: the rise and the half-width, as fractions of the
+    /// effect's height. The aspect is NOT authored: it is the effect's own
+    /// height / width, emitted from its size.
+    #[serde(default = "default_bulge")]
+    pub bulge: f32,
+    #[serde(default = "default_thickness")]
+    pub thickness: f32,
+    /// ProminenceArc: bulge to the right of the throw instead of the left.
+    #[serde(default)]
+    pub flip: bool,
+    /// PulsarBeam: `Some(toward +y)` while it sweeps.
+    #[serde(default)]
+    pub sweep: Option<bool>,
 }
 
 impl Default for ObjectEffectSpec {
@@ -279,18 +376,25 @@ impl Default for ObjectEffectSpec {
             amount: default_amount(),
             progress: 0.0,
             snap: None,
+            hot: false,
             edge: ScreenEdgeSpec::default(),
             mode: MarkerModeSpec::default(),
             side: ImpactSideSpec::default(),
             levels: default_levels(),
             flags: default_flags(),
+            arc_stage: ArcStageSpec::default(),
+            beam_stage: BeamStageSpec::default(),
+            bulge: default_bulge(),
+            thickness: default_thickness(),
+            flip: false,
+            sweep: None,
         }
     }
 }
 
 impl ObjectEffectSpec {
-    /// The `Effect::..` expression.
-    pub fn effect_expr(&self, f32_lit: impl Fn(f32) -> String) -> String {
+    /// The `Effect::..` expression for an effect drawn `size` large.
+    pub fn effect_expr(&self, size: (f32, f32), f32_lit: impl Fn(f32) -> String) -> String {
         let k = self.kind;
         let mut fields = Vec::new();
         for field in k.fields() {
@@ -307,6 +411,25 @@ impl ObjectEffectSpec {
                 "snap" => match self.snap {
                     None => "None".to_owned(),
                     Some(t) => format!("Some({})", f32_lit(t.clamp(0.0, 1.0))),
+                },
+                "hot" => if self.hot { "true".to_owned() } else { "false".to_owned() },
+                "flip" => if self.flip { "true".to_owned() } else { "false".to_owned() },
+                "stage" => match k {
+                    EffectKind::PulsarBeam => format!("BeamStage::{}", self.beam_stage.name()),
+                    _ => format!("ArcStage::{}", self.arc_stage.name()),
+                },
+                "bulge" => f32_lit(self.bulge.clamp(0.0, 1.0)),
+                "thickness" => f32_lit(self.thickness.clamp(0.0, 0.5)),
+                // The arc is drawn in units of the sprite's height; its
+                // aspect is a fact about the size, so it is derived, not set.
+                "aspect" => f32_lit(if size.0.abs() > f32::EPSILON {
+                    (size.1 / size.0 * 1000.0).round() / 1000.0
+                } else {
+                    1.0
+                }),
+                "sweep" => match self.sweep {
+                    None => "None".to_owned(),
+                    Some(b) => format!("Some({b})"),
                 },
                 "edge" => format!("ScreenEdge::{}", self.edge.name()),
                 "mode" => format!("MarkerMode::{}", self.mode.name()),
@@ -327,7 +450,7 @@ impl ObjectEffectSpec {
         let size = (w * self.scale[0], h * self.scale[1]);
         format!(
             "    {id}.set_effect({}, EffectColor::srgb8({}, {}, {}), ({}, {}));\n",
-            self.effect_expr(&f32_lit),
+            self.effect_expr(size, &f32_lit),
             self.rgb[0],
             self.rgb[1],
             self.rgb[2],
@@ -359,6 +482,38 @@ impl ObjectEffectSpec {
                     spec.snap = match e {
                         Expr::Call(c) if path_tail(&c.func).as_deref() == Some("Some") => {
                             Some(num(c.args.first()?)?)
+                        }
+                        _ => None,
+                    }
+                }
+                "hot" => {
+                    spec.hot = matches!(e, Expr::Lit(l) if matches!(&l.lit, Lit::Bool(b) if b.value));
+                }
+                "flip" => {
+                    spec.flip = matches!(e, Expr::Lit(l) if matches!(&l.lit, Lit::Bool(b) if b.value));
+                }
+                "stage" => {
+                    let n = path_tail(e)?;
+                    if kind == EffectKind::PulsarBeam {
+                        spec.beam_stage = BeamStageSpec::ALL.into_iter().find(|x| x.name() == n)?;
+                    } else {
+                        spec.arc_stage = ArcStageSpec::ALL.into_iter().find(|x| x.name() == n)?;
+                    }
+                }
+                "bulge" => spec.bulge = num(e)?,
+                "thickness" => spec.thickness = num(e)?,
+                // Derived from the size on the way out; nothing to keep.
+                "aspect" => {}
+                "sweep" => {
+                    spec.sweep = match e {
+                        Expr::Call(c) if path_tail(&c.func).as_deref() == Some("Some") => {
+                            match strip(c.args.first()?) {
+                                Expr::Lit(l) => match &l.lit {
+                                    Lit::Bool(b) => Some(b.value),
+                                    _ => return None,
+                                },
+                                _ => return None,
+                            }
                         }
                         _ => None,
                     }
@@ -488,11 +643,28 @@ mod tests {
         let body = &ENGINE[start..];
         let body = &body[..body.find("\n}\n").expect("enum end")];
         let mut out = Vec::new();
+        // A variant may span lines (`Name {` .. fields .. `},`): join them
+        // until its braces balance, so a long variant is read whole rather
+        // than as one empty variant followed by fields posing as variants.
+        let mut joined: Vec<String> = Vec::new();
+        let mut open = String::new();
         for line in body.lines().skip(1) {
             let t = line.trim();
             if t.starts_with("///") || t.is_empty() {
                 continue;
             }
+            if open.is_empty() {
+                open = t.to_owned();
+            } else {
+                open.push(' ');
+                open.push_str(t);
+            }
+            if open.matches('{').count() == open.matches('}').count() {
+                joined.push(std::mem::take(&mut open));
+            }
+        }
+        for t in &joined {
+            let t = t.as_str();
             let (name, rest) = t.split_once(' ').unwrap_or((t.trim_end_matches(','), ""));
             let fields = rest
                 .trim_start_matches('{')
@@ -511,7 +683,9 @@ mod tests {
     fn authorable_effects_match_the_engine() {
         let engine = engine_variants();
         assert!(engine.len() >= 13, "failed to read the engine enum: {engine:?}");
-        let not_authorable = ["Image", "AnimatedImage"];
+        // OutlineState takes the outline field quartz builds from the sprite
+        // at runtime; there is nothing to author.
+        let not_authorable = ["Image", "AnimatedImage", "OutlineState"];
         for (name, fields) in &engine {
             if not_authorable.contains(&name.as_str()) {
                 continue;
@@ -549,11 +723,18 @@ mod tests {
                 amount: 0.7,
                 progress: 0.6,
                 snap: Some(0.3),
+                hot: true,
                 edge: ScreenEdgeSpec::Left,
                 mode: MarkerModeSpec::WindingUp,
                 side: ImpactSideSpec::Taken,
                 levels: [0.1, 0.5, 0.9, 1.0],
                 flags: vec!["FIRE".into(), "PULSE_GLOW".into()],
+                arc_stage: ArcStageSpec::Burn,
+                beam_stage: BeamStageSpec::Live,
+                bulge: 0.4,
+                thickness: 0.12,
+                flip: true,
+                sweep: Some(false),
             };
             let stmt = spec.set_effect_stmt("gen", 200.0, 80.0, lit);
             let parsed: syn::Stmt = syn::parse_str(stmt.trim()).unwrap_or_else(|e| panic!("{stmt}: {e}"));
@@ -568,10 +749,22 @@ mod tests {
             // Only what this kind emits is expected back.
             if kind.takes("progress") { assert!((back.progress - 0.6).abs() < 1e-6); }
             if kind.takes("snap") { assert_eq!(back.snap, Some(0.3)); }
+            if kind.takes("hot") { assert!(back.hot, "{stmt}"); }
             if kind.takes("edge") { assert_eq!(back.edge, ScreenEdgeSpec::Left); }
             if kind.takes("mode") { assert_eq!(back.mode, MarkerModeSpec::WindingUp); }
             if kind.takes("side") { assert_eq!(back.side, ImpactSideSpec::Taken); }
             if kind.takes("levels") { assert_eq!(back.levels, spec.levels); }
+            if kind == EffectKind::ProminenceArc {
+                assert_eq!(back.arc_stage, ArcStageSpec::Burn, "{stmt}");
+                assert!((back.bulge - 0.4).abs() < 1e-6 && (back.thickness - 0.12).abs() < 1e-6, "{stmt}");
+                assert!(back.flip, "{stmt}");
+                // 1.5 x 200 wide, 0.25 x 80 high: the aspect is the size's.
+                assert!(stmt.contains("aspect: 0.067"), "{stmt}");
+            }
+            if kind == EffectKind::PulsarBeam {
+                assert_eq!(back.beam_stage, BeamStageSpec::Live, "{stmt}");
+                assert_eq!(back.sweep, Some(false), "{stmt}");
+            }
             if kind.takes("flags") {
                 // Emitted in bit order, so compare as sets.
                 let mut f = back.flags.clone();
@@ -589,11 +782,12 @@ mod tests {
             scale: [1.0, 1.0],
             amount: 0.95,
             snap: None,
+            hot: false,
             ..Default::default()
         };
         assert_eq!(
             spec.set_effect_stmt("tether", 1000.0, 70.0, lit),
-            "    tether.set_effect(Effect::EnergyTether { intensity: 0.95, snap: None }, \
+            "    tether.set_effect(Effect::EnergyTether { intensity: 0.95, snap: None, hot: false }, \
              EffectColor::srgb8(140, 215, 255), (1000.0, 70.0));\n"
         );
     }

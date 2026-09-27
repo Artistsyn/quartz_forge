@@ -4,7 +4,8 @@
 use eframe::egui::{self, Color32, Slider};
 
 use crate::core::object_effect::{
-    EffectKind, ImpactSideSpec, MarkerModeSpec, ObjectEffectSpec, ScreenEdgeSpec, VFX_FLAG_NAMES,
+    ArcStageSpec, BeamStageSpec, EffectKind, ImpactSideSpec, MarkerModeSpec, ObjectEffectSpec,
+    ScreenEdgeSpec, VFX_FLAG_NAMES,
 };
 use crate::core::quartz_domain::QuartzObjectBlueprint;
 
@@ -70,6 +71,12 @@ pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectB
                 changed |= ui.add(Slider::new(t, 0.0..=1.0).text("snap progress")).changed();
             }
         }
+        if kind.takes("hot") {
+            changed |= ui
+                .checkbox(&mut spec.hot, "hot")
+                .on_hover_text("Wrapped in a crackling weave: a line that hurts to touch.")
+                .changed();
+        }
         if kind.takes("edge") {
             egui::ComboBox::from_id_salt(("effect_edge", id.as_str()))
                 .selected_text(spec.edge.name())
@@ -95,6 +102,53 @@ pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectB
                     for s in ImpactSideSpec::ALL {
                         changed |= ui.selectable_value(&mut spec.side, s, s.name()).changed();
                     }
+                });
+        }
+        if kind.takes("stage") {
+            egui::ComboBox::from_id_salt(("effect_stage", id.as_str()))
+                .selected_text(if kind == EffectKind::PulsarBeam {
+                    spec.beam_stage.name()
+                } else {
+                    spec.arc_stage.name()
+                })
+                .show_ui(ui, |ui| {
+                    if kind == EffectKind::PulsarBeam {
+                        for st in BeamStageSpec::ALL {
+                            changed |= ui.selectable_value(&mut spec.beam_stage, st, st.name()).changed();
+                        }
+                    } else {
+                        for st in ArcStageSpec::ALL {
+                            changed |= ui.selectable_value(&mut spec.arc_stage, st, st.name()).changed();
+                        }
+                    }
+                });
+        }
+        if kind.takes("bulge") {
+            changed |= ui
+                .add(Slider::new(&mut spec.bulge, 0.0..=1.0).text("rise (of height)"))
+                .changed();
+            changed |= ui
+                .add(Slider::new(&mut spec.thickness, 0.01..=0.5).text("half-width (of height)"))
+                .changed();
+            ui.small("Keep rise + 2.6 × half-width ≤ 1, or the arc's glow is clipped. The aspect is taken from the effect's size.");
+        }
+        if kind.takes("flip") {
+            changed |= ui
+                .checkbox(&mut spec.flip, "bulge right of the throw")
+                .changed();
+        }
+        if kind.takes("sweep") {
+            let label = match spec.sweep {
+                None => "not sweeping",
+                Some(true) => "sweeping toward +y",
+                Some(false) => "sweeping toward -y",
+            };
+            egui::ComboBox::from_id_salt(("effect_sweep", id.as_str()))
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    changed |= ui.selectable_value(&mut spec.sweep, None, "not sweeping").changed();
+                    changed |= ui.selectable_value(&mut spec.sweep, Some(true), "sweeping toward +y").changed();
+                    changed |= ui.selectable_value(&mut spec.sweep, Some(false), "sweeping toward -y").changed();
                 });
         }
         if kind.takes("levels") {
