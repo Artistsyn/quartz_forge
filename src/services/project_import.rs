@@ -4622,6 +4622,7 @@ mod roundtrip_fixed_point_tests {
                 render_layer: -100,
                 camera_pinned: true,
                 tint: [255, 255, 255],
+                path_forge: None,
                 use_plugin_cache: false,
                 cache_dir: "assets/bg_cache".to_owned(),
                 background_key: "main".to_owned(),
@@ -4676,6 +4677,60 @@ mod roundtrip_fixed_point_tests {
         assert!(!leaked, "camera/background leaked into raw setup_runtime code");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A PathForge background (live with a journey and settings, frames from an
+    /// export, a live preset) survives generate -> import -> regenerate: the
+    /// spec comes back equal, the regenerated file is identical, and nothing
+    /// leaks into generic objects, required_plugins or raw setup code.
+    #[test]
+    fn path_forge_background_survives_roundtrip() {
+        use crate::core::project::{PathForgeBackground, PathForgeMode};
+        use crate::services::project_sync::build_scene_source;
+
+        let mut live = PathForgeBackground::new("assets/backgrounds/game.journey.json");
+        live.size = [180, 320];
+        live.render_fps = 24.0;
+        live.speed = Some(3.5);
+        let mut frames = PathForgeBackground::new("assets/exports/game.journey.json");
+        frames.mode = PathForgeMode::Frames;
+        let preset = PathForgeBackground::new("preset:Forest Path");
+        for (n, pf) in [live, frames, preset].into_iter().enumerate() {
+            let root = temp_root(&format!("path_forge_bg_{n}"));
+            std::fs::create_dir_all(root.join("src/scenes")).unwrap();
+            let rel = "src/scenes/main_scene.rs";
+            let mut state = EditorProjectState::new("pfbg".to_owned());
+            state.manifest.scenes[0].source_file = rel.to_owned();
+            {
+                let bg = &mut state.manifest.scenes[0].background;
+                bg.enabled = true;
+                bg.object_id = "path_bg".to_owned();
+                bg.render_layer = -90;
+                bg.path_forge = Some(pf.clone());
+            }
+            let source = build_scene_source(&state, 0);
+            assert!(source.contains("use quartz_path_forge::PathForgePlugin;"), "{source}");
+            assert!(!source.contains("LayeredBackground"), "a PathForge background emits no layers");
+            std::fs::write(root.join(rel), &source).unwrap();
+
+            let mut imported = EditorProjectState::new("pfbg".to_owned());
+            imported.manifest.scenes[0].source_file = rel.to_owned();
+            import_files_into_state(&mut imported, &root, &[rel.to_owned()], true).unwrap();
+            let got = &imported.manifest.scenes[0];
+            assert_eq!(
+                serde_json::to_value(&state.manifest.scenes[0].background).unwrap(),
+                serde_json::to_value(&got.background).unwrap(),
+                "PathForge background must survive roundtrip ({:?})", pf.mode
+            );
+            assert!(!got.objects.iter().any(|o| o.id == "path_bg"), "background object leaked into generic objects");
+            assert!(got.required_plugins.is_empty(), "PathForgePlugin leaked into required_plugins: {:?}", got.required_plugins);
+            assert!(
+                !got.custom_code_blocks.iter().any(|b| b.code.contains("PathForgePlugin") || b.code.contains("path_forge")),
+                "PathForge background leaked into raw setup code"
+            );
+            assert_eq!(build_scene_source(&imported, 0), source, "regenerating must give the same file");
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// SYNFUL: full lighting + post-fx + per-object flags survive the
@@ -4926,6 +4981,7 @@ mod roundtrip_fixed_point_tests {
             render_layer: -100,
             camera_pinned: true,
             tint: [255, 255, 255],
+            path_forge: None,
             use_plugin_cache: true,
             cache_dir: "assets/bg_cache".to_owned(),
             background_key: "main".to_owned(),
@@ -6852,8 +6908,71 @@ fn background_object_ids_in_fn(func: &ItemFn) -> Vec<String> {
                 ids.push(stripped.to_owned());
             }
         }
+        // PathForge: `let __<id>_path_forge = PathForgePlugin::live|frames(..)`
+        if let Some(stripped) = name.strip_prefix("__").and_then(|s| s.strip_suffix("_path_forge")) {
+            if init_text.contains("PathForgePlugin") {
+                ids.push(stripped.to_owned());
+            }
+        }
     }
     ids
+}
+
+/// A PathForge background's plugin local, as `path_forge_background_lines`
+/// writes it: `let __<id>_path_forge = PathForgePlugin::live(<src>, "<id>",
+/// (w, h))[.map(|p| p.with_render_fps(f).with_speed(s))];` (or `::frames(<src>,
+/// "<id>")`). Returns the object id and the spec.
+fn parse_path_forge_local(stmt: &Stmt) -> Option<(String, crate::core::project::PathForgeBackground)> {
+    use crate::core::project::{PathForgeBackground, PathForgeMode};
+    let Stmt::Local(local) = stmt else { return None };
+    let Pat::Ident(PatIdent { ident, .. }) = &local.pat else { return None };
+    let id = ident.to_string().strip_prefix("__")?.strip_suffix("_path_forge")?.to_owned();
+    let mut expr = local.init.as_ref()?.expr.as_ref();
+    // `.map(|p| p.with_..()...)`: the settings, read off the closure's chain.
+    let mut withs: Vec<(String, Expr)> = Vec::new();
+    if let Expr::MethodCall(m) = expr {
+        if m.method == "map" {
+            if let Some(Expr::Closure(c)) = m.args.first() {
+                let mut body = c.body.as_ref();
+                while let Expr::MethodCall(w) = body {
+                    if let Some(a) = w.args.first() {
+                        withs.push((w.method.to_string(), a.clone()));
+                    }
+                    body = &w.receiver;
+                }
+            }
+            expr = &m.receiver;
+        }
+    }
+    let Expr::Call(ExprCall { func, args, .. }) = expr else { return None };
+    if !func.to_token_stream().to_string().contains("PathForgePlugin") {
+        return None;
+    }
+    let mode = match path_last_ident(func).as_deref() {
+        Some("live") => PathForgeMode::Live,
+        Some("frames") => PathForgeMode::Frames,
+        _ => return None,
+    };
+    let src = args.first()?;
+    let source = extract_string_literal(src).or_else(|| asset_path_from_bytes_expr(src))?;
+    let mut pf = PathForgeBackground::new(source);
+    pf.mode = mode;
+    if mode == PathForgeMode::Live {
+        if let Some(Expr::Tuple(t)) = args.get(2) {
+            let v: Vec<u32> = t.elems.iter().filter_map(|e| expr_to_u32(e).ok()).collect();
+            if v.len() == 2 {
+                pf.size = [v[0], v[1]];
+            }
+        }
+    }
+    for (m, a) in withs {
+        match m.as_str() {
+            "with_render_fps" => if let Ok(f) = expr_to_f32(&a) { pf.render_fps = f; },
+            "with_speed" => pf.speed = expr_to_f32(&a).ok(),
+            _ => {}
+        }
+    }
+    Some((id, pf))
 }
 
 /// True if the add_plugin arg is a background-plugin local (`__<id>_plugin`),
@@ -7103,6 +7222,14 @@ fn extract_background_spec(func: &ItemFn) -> Option<crate::core::project::Backgr
         }
     }
 
+    // 1c. PathForge: `let __<id>_path_forge = PathForgePlugin::live|frames(..)`.
+    if object_id.is_none() {
+        if let Some((id, pf)) = func.block.stmts.iter().find_map(parse_path_forge_local) {
+            spec.path_forge = Some(pf);
+            object_id = Some(id);
+        }
+    }
+
     let id = object_id?;
     spec.object_id = id.clone();
     spec.enabled = true;
@@ -7144,8 +7271,9 @@ fn is_background_stmt(stmt: &Stmt, bg_id: Option<&str>) -> bool {
         Stmt::Local(local) => {
             if let Pat::Ident(PatIdent { ident, .. }) = &local.pat {
                 let n = ident.to_string();
-                // bg object local, direct-mode composite local, plugin local.
-                n == id || n == format!("__{id}_img") || n == plugin_local
+                // bg object local, direct-mode composite local, plugin local,
+                // PathForge plugin local.
+                n == id || n == format!("__{id}_img") || n == plugin_local || n == format!("__{id}_path_forge")
             } else {
                 false
             }
@@ -7177,6 +7305,15 @@ fn is_background_stmt(stmt: &Stmt, bg_id: Option<&str>) -> bool {
                     .unwrap_or(false);
             }
             false
+        }
+        // The PathForge background's `<id>.unlit = true;`.
+        Stmt::Expr(Expr::Assign(a), _) => {
+            matches!(a.left.as_ref(), Expr::Field(f) if expr_ident_name(&f.base).as_deref() == Some(id)
+                && matches!(&f.member, syn::Member::Named(m) if m == "unlit"))
+        }
+        // The PathForge `match __<id>_path_forge { Ok(p) => canvas.add_plugin(p), Err(e) => .. }`.
+        Stmt::Expr(Expr::Match(m), _) => {
+            expr_ident_name(&m.expr).is_some_and(|n| n == format!("__{id}_path_forge"))
         }
         // The plugin-mode `if let Some(__<id>_composite) = canvas.get_plugin::<BackgroundPlugin>()...` block.
         Stmt::Expr(Expr::If(if_expr), _) => {

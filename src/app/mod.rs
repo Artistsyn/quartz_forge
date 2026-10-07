@@ -85,6 +85,9 @@ pub(super) struct EditorSuggestions {
     /// Keys of every background defined on the active scene — powers the
     /// structured background transition/switch editor.
     pub background_keys: Vec<String>,
+    /// The active scene has a PathForge background: powers the PathForge
+    /// quick-add buttons (walk on, choose a branch, stop, walk).
+    pub path_forge: bool,
 }
 
 // ── SYNFUL lighting editor helpers ──────────────────────────────────────────
@@ -431,6 +434,12 @@ pub struct QuartzForgeApp {
     /// Re-rendered only when the background's spec actually changes, so slider
     /// drags don't recomposite every frame.
     background_preview_cache: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
+    /// PathForge background preview: the runtime walking the scene or journey,
+    /// its texture, whether it is walking, and when it last stepped.
+    path_forge_preview: Option<crate::services::path_forge_preview::PathForgePreview>,
+    path_forge_texture: Option<egui::TextureHandle>,
+    path_forge_walking: bool,
+    path_forge_last: Option<std::time::Instant>,
     /// SYNFUL: cached lighting preview: fingerprint → texture (single scene).
     lighting_preview_cache: Option<(u64, egui::TextureHandle)>,
     show_camera_view_grid: bool,
@@ -525,6 +534,10 @@ impl Default for QuartzForgeApp {
             show_background_window: false,
             show_lighting_window: false,
             background_preview_cache: std::collections::HashMap::new(),
+            path_forge_preview: None,
+            path_forge_texture: None,
+            path_forge_walking: true,
+            path_forge_last: None,
             lighting_preview_cache: None,
             show_camera_view_grid: true,
             show_pivot_points: false,
@@ -630,13 +643,18 @@ impl QuartzForgeApp {
             variable_names: variable_names.into_iter().collect(),
             constant_names: constant_names.into_iter().collect(),
             expression_names: expression_names.into_iter().collect(),
-            background_keys: scene
-                .background
-                .resolved_backgrounds()
-                .into_iter()
-                .map(|nb| nb.key)
-                .filter(|k| !k.trim().is_empty())
-                .collect(),
+            background_keys: if scene.background.path_forge.is_some() {
+                Vec::new()
+            } else {
+                scene
+                    .background
+                    .resolved_backgrounds()
+                    .into_iter()
+                    .map(|nb| nb.key)
+                    .filter(|k| !k.trim().is_empty())
+                    .collect()
+            },
+            path_forge: scene.background.path_forge_active().is_some(),
         }
     }
 
@@ -1084,13 +1102,21 @@ impl QuartzForgeApp {
                 (
                     s.canvas.virtual_width,
                     s.canvas.virtual_height,
-                    s.background.enabled,
+                    s.background.layered_active(),
                     s.background.resolved_backgrounds(),
+                    s.background.path_forge_active().cloned(),
                 )
             });
 
-        // Phase 2 — live composite previews (same compositor the engine uses).
-        if let Some((vw, vh, enabled, resolved)) = preview_data {
+        // Phase 2 — live composite previews (same compositor the engine uses),
+        // or the PathForge walk.
+        if let Some((_, _, _, _, Some(pf))) = &preview_data {
+            self.path_forge_preview_ui(ui, pf);
+            ui.separator();
+        } else {
+            self.path_forge_preview = None;
+        }
+        if let Some((vw, vh, enabled, resolved, _)) = preview_data {
             if enabled && !resolved.is_empty() {
                 ui.label("Composite preview:");
                 for nb in &resolved {
@@ -1115,11 +1141,31 @@ impl QuartzForgeApp {
             ui.label("No active scene.");
             return;
         };
+        let (vw, vh) = (scene.canvas.virtual_width, scene.canvas.virtual_height);
+        let project_root = self.project_root.clone();
         let bg = &mut scene.background;
         let mut changed = false;
 
-        changed |= ui.checkbox(&mut bg.enabled, "Enable composited background").changed();
-        ui.label("Generates a full-screen background object from stacked layers (bottom → top).");
+        changed |= ui.checkbox(&mut bg.enabled, "Enable background").changed();
+        let mut use_pf = bg.path_forge.is_some();
+        ui.horizontal(|ui| {
+            ui.label("Draw from");
+            changed |= ui.radio_value(&mut use_pf, false, "Layers").changed();
+            changed |= ui.radio_value(&mut use_pf, true, "PathForge scene / journey").changed();
+        });
+        if use_pf && bg.path_forge.is_none() {
+            let mut pf = crate::core::project::PathForgeBackground::new("preset:Forest Path");
+            // Render in the canvas's shape, 480 px tall.
+            pf.size = [((480.0 * vw / vh.max(1.0)).round() as u32).max(2), 480];
+            bg.path_forge = Some(pf);
+        } else if !use_pf {
+            bg.path_forge = None;
+        }
+        ui.label(if use_pf {
+            "A full-screen object the quartz_path_forge plugin keeps showing the walk (live, or from exported frames)."
+        } else {
+            "Generates a full-screen background object from stacked layers (bottom → top)."
+        });
         ui.separator();
 
         ui.add_enabled_ui(bg.enabled, |ui| {
@@ -1130,6 +1176,10 @@ impl QuartzForgeApp {
                 ui.label("render layer");
                 changed |= ui.add(egui::DragValue::new(&mut bg.render_layer).range(-1000..=0)).changed();
             });
+            if let Some(pf) = &mut bg.path_forge {
+                changed |= Self::path_forge_fields(ui, pf, vw, vh, project_root.as_deref());
+                return;
+            }
             ui.horizontal(|ui| {
                 ui.label("global tint");
                 changed |= ui.color_edit_button_srgb(&mut bg.tint).changed();
@@ -1237,6 +1287,138 @@ impl QuartzForgeApp {
         if changed {
             self.project_state.dirty = true;
         }
+    }
+
+    /// PathForge background settings. Returns whether anything changed.
+    fn path_forge_fields(
+        ui: &mut egui::Ui,
+        pf: &mut crate::core::project::PathForgeBackground,
+        vw: f32,
+        vh: f32,
+        project_root: Option<&std::path::Path>,
+    ) -> bool {
+        use crate::core::project::PathForgeMode;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("mode");
+            changed |= ui.radio_value(&mut pf.mode, PathForgeMode::Live, "Live").on_hover_text("PathForge renders every frame in the game, on a worker thread: any speed, transitions and forks at run time").changed();
+            changed |= ui.radio_value(&mut pf.mode, PathForgeMode::Frames, "Exported frames").on_hover_text("Plays what `pf journey --formats png` wrote: nothing rendered on the device").changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("source");
+            changed |= ui.add(egui::TextEdit::singleline(&mut pf.source).desired_width(260.0)).changed();
+            if ui.button("File…").clicked() {
+                let mut dlg = rfd::FileDialog::new().add_filter("PathForge scene, journey or export", &["json"]);
+                if let Some(r) = project_root { dlg = dlg.set_directory(r); }
+                if let Some(f) = dlg.pick_file() {
+                    pf.source = match project_root.and_then(|r| f.strip_prefix(r).ok()) {
+                        Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+                        None => f.to_string_lossy().into_owned(),
+                    };
+                    changed = true;
+                }
+            }
+        });
+        let s = pf.source.trim().to_owned();
+        if s.starts_with("preset:") {
+            ui.small("A built-in PathForge preset (live only).");
+        } else if std::path::Path::new(&s).is_absolute() {
+            ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "⚠ Outside the project: the game reads it from this absolute path. Put it under assets/ to ship it with the game.");
+        }
+        if pf.mode == PathForgeMode::Live {
+            ui.horizontal(|ui| {
+                ui.label("render size");
+                changed |= ui.add(egui::DragValue::new(&mut pf.size[0]).range(2..=2048)).changed();
+                ui.label("×");
+                changed |= ui.add(egui::DragValue::new(&mut pf.size[1]).range(2..=2048)).changed();
+                if ui.small_button("canvas shape").on_hover_text("Same shape as the canvas, this many pixels tall").clicked() {
+                    pf.size[0] = ((pf.size[1] as f32 * vw / vh.max(1.0)).round() as u32).max(2);
+                    changed = true;
+                }
+            });
+            let (a, b) = (pf.size[0] as f32 / pf.size[1].max(1) as f32, vw / vh.max(1.0));
+            if (a / b).ln().abs() > 0.1 {
+                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), format!("⚠ {}×{} is not the canvas's shape ({vw}×{vh}): the frame will be stretched.", pf.size[0], pf.size[1]));
+            }
+            ui.small("Smaller renders faster (about 1.4 ms at 135×240, 3.6 ms at 270×480 on a desktop CPU); the object scales it up.");
+            ui.horizontal(|ui| {
+                ui.label("render fps");
+                changed |= ui.add(egui::Slider::new(&mut pf.render_fps, 6.0..=60.0)).changed();
+            });
+        }
+        ui.horizontal(|ui| {
+            let mut own = pf.speed.is_none();
+            changed |= ui.checkbox(&mut own, "each scene's own walking speed").changed();
+            if own { pf.speed = None; } else {
+                let mut v = pf.speed.unwrap_or(2.4);
+                changed |= ui.add(egui::Slider::new(&mut v, 0.0..=12.0).text("m/s")).changed();
+                pf.speed = Some(v);
+            }
+        });
+        ui.separator();
+        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · at:<stop>.");
+        changed
+    }
+
+    /// The PathForge preview: PathForge's runtime walking the source, with the
+    /// game's "walk on" and "choose" so a journey can be walked here.
+    fn path_forge_preview_ui(&mut self, ui: &mut egui::Ui, pf: &crate::core::project::PathForgeBackground) {
+        use crate::services::path_forge_preview::PathForgePreview;
+        use path_forge::scene::transition::Branch;
+        let root = self.project_root.clone();
+        if !self.path_forge_preview.as_ref().is_some_and(|p| p.is_for(pf, root.as_deref())) {
+            self.path_forge_preview = Some(PathForgePreview::open(pf, root.as_deref()));
+            self.path_forge_last = None;
+        }
+        let now = std::time::Instant::now();
+        let dt = if self.path_forge_walking { self.path_forge_last.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1) } else { 0.0 };
+        self.path_forge_last = Some(now);
+        let Some(p) = self.path_forge_preview.as_mut() else { return };
+        // A preview-sized frame in the render size's shape.
+        let h = 240u32;
+        let w = ((h as f32 * pf.size[0] as f32 / pf.size[1].max(1) as f32).round() as u32).max(2);
+        if let Some((fw, fh, rgba)) = p.frame(dt, pf.speed, w, h) {
+            let img = egui::ColorImage::from_rgba_unmultiplied([fw as usize, fh as usize], &rgba);
+            match &mut self.path_forge_texture {
+                Some(t) => t.set(img, egui::TextureOptions::NEAREST),
+                None => self.path_forge_texture = Some(ui.ctx().load_texture("path_forge_preview", img, egui::TextureOptions::NEAREST)),
+            }
+        }
+        ui.label("PathForge preview:");
+        if let Some(e) = &p.error { ui.colored_label(egui::Color32::from_rgb(230, 90, 80), e); }
+        if let Some(t) = &self.path_forge_texture {
+            let size = t.size_vec2();
+            let k = (ui.available_width().min(320.0) / size.x).min(360.0 / size.y);
+            ui.add(egui::Image::new(t).fit_to_exact_size(size * k));
+        }
+        let state = p.state();
+        ui.horizontal(|ui| {
+            if ui.button(if self.path_forge_walking { "⏸ stand" } else { "▶ walk" }).clicked() { self.path_forge_walking = !self.path_forge_walking; }
+            if state.is_some() {
+                if ui.button("walk on (next)").on_hover_text("What RunPlugin path_forge \"next\" does: the transition or fork to the next stop").clicked() { p.next(); }
+                let fork = state.as_ref().is_some_and(|s| s.choose_within.is_some());
+                if ui.add_enabled(fork, egui::Button::new("choose left")).clicked() { p.choose(Branch::Left); }
+                if ui.add_enabled(fork, egui::Button::new("choose right")).clicked() { p.choose(Branch::Right); }
+            }
+            if ui.small_button("⟲ restart").clicked() { p.restart(pf, root.as_deref()); }
+        });
+        if let Some(s) = &state {
+            ui.small(format!(
+                "{}{} · {:.1} m{}{}",
+                s.stop.as_deref().map(|x| format!("stop {x} · ")).unwrap_or_default(),
+                s.scene,
+                s.distance,
+                s.progress.map(|x| format!(" · walking on {:.0}%", x * 100.0)).unwrap_or_default(),
+                s.choose_within.map(|x| format!(" · choose within {x:.0} m")).unwrap_or_default(),
+            ));
+        }
+        if let Some(n) = &p.note { ui.small(n.clone()); }
+        if !p.stops.is_empty() {
+            egui::CollapsingHeader::new(format!("journey: {} stops", p.stops.len())).id_salt("pf_stops").show(ui, |ui| {
+                for s in &p.stops { ui.small(s.clone()); }
+            });
+        }
+        if self.path_forge_walking { ui.ctx().request_repaint(); }
     }
 
     /// Render (or reuse a cached) composite preview for a named background and
@@ -2100,7 +2282,9 @@ impl QuartzForgeApp {
             .id_salt("inspector_background")
             .show(ui, |ui| {
                 let enabled = scene.background.enabled;
-                ui.label(if enabled {
+                ui.label(if let Some(pf) = scene.background.path_forge_active() {
+                    format!("PathForge ({:?}): {}. Edit in the Background Authoring window.", pf.mode, pf.source)
+                } else if enabled {
                     format!("{} layer(s). Edit in the Background Authoring window.", scene.background.layers.len())
                 } else {
                     "No composited background.".to_owned()
@@ -7352,6 +7536,32 @@ mod tests {
         assert!(scene.lighting.enabled);
         assert_eq!(scene.lighting.lights.len(), 3);
         assert!(scene.post_fx.bloom_enabled);
+
+        // The same panels with a PathForge background: the settings, the live
+        // preview (PathForge's runtime walking a preset) and the PathForge
+        // quick-add buttons and structured editor on a path_forge action.
+        {
+            let scene = &mut app.project_state.manifest.scenes[0];
+            let mut pf = crate::core::project::PathForgeBackground::new("preset:Stone Dungeon");
+            pf.size = [54, 96];
+            scene.background.path_forge = Some(pf);
+            scene.events[0].action = Some(crate::core::quartz_domain::QuartzAction::RunPlugin {
+                name: "path_forge".to_owned(),
+                data: "choose:right".to_owned(),
+            });
+        }
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.inspector_panel(ui));
+                egui::Window::new("bg_test").show(ctx, |ui| app.background_window_panel(ui));
+                egui::Window::new("events_test").show(ctx, |ui| app.events_editor(ui));
+            });
+        }
+        let scene = &app.project_state.manifest.scenes[0];
+        assert_eq!(scene.background.path_forge.as_ref().map(|p| p.source.as_str()), Some("preset:Stone Dungeon"));
+        let preview = app.path_forge_preview.as_ref().expect("the PathForge preview opened");
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        assert!(app.path_forge_texture.is_some(), "the preview drew a frame");
     }
 
     #[test]

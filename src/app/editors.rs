@@ -175,6 +175,61 @@ impl QuartzForgeApp {
         changed
     }
 
+    /// Structured editor for the PathForge background plugin's `data`
+    /// (quartz_path_forge): walk · stop · speed:<m/s> · next · choose:left|right
+    /// · finish, and in live mode scene:/transition:/fork:/journey: with a file.
+    fn path_forge_plugin_data_editor(ui: &mut egui::Ui, data: &mut String) -> bool {
+        let mut changed = false;
+        let trimmed = data.trim().to_owned();
+        let (verb, arg) = trimmed.split_once(':').map(|(a, b)| (a.trim().to_owned(), b.trim().to_owned())).unwrap_or((trimmed.clone(), String::new()));
+        ui.label("PathForge action");
+        ui.horizontal_wrapped(|ui| {
+            for (v, label, hint, fill) in [
+                ("next", "walk on", "Go on to where the journey leads: a transition, or a fork", "next"),
+                ("choose", "choose branch", "Take a branch of the fork ahead (before its junction)", "choose:left"),
+                ("stop", "stop", "Stand still; flames and weather keep moving", "stop"),
+                ("walk", "walk", "Walk on at the set speed", "walk"),
+                ("speed", "speed", "Walking speed in metres per second", "speed:3.5"),
+                ("finish", "finish", "Cut to the end of the walk under way", "finish"),
+                ("transition", "transition to…", "Live mode: walk into another scene (a file, or preset:Name)", "transition:preset:Forest Path"),
+                ("fork", "fork…", "Live mode: a fork into two scenes", "fork:preset:Mountain Pass|preset:Desert Canyon"),
+                ("scene", "cut to…", "Live mode: show another scene at once", "scene:preset:Forest Path"),
+            ] {
+                if ui.selectable_label(verb == v, label).on_hover_text(hint).clicked() && verb != v {
+                    *data = fill.to_owned();
+                    changed = true;
+                }
+            }
+        });
+        match verb.as_str() {
+            "choose" => {
+                let mut b = if arg == "right" { "right" } else { "left" };
+                ui.horizontal(|ui| {
+                    changed |= ui.radio_value(&mut b, "left", "left").changed();
+                    changed |= ui.radio_value(&mut b, "right", "right").changed();
+                });
+                if changed { *data = format!("choose:{b}"); }
+            }
+            "speed" => {
+                let mut v = arg.parse::<f32>().unwrap_or(3.5);
+                if ui.add(egui::Slider::new(&mut v, 0.0..=12.0).text("m/s")).changed() {
+                    *data = format!("speed:{v}");
+                    changed = true;
+                }
+            }
+            "transition" | "fork" | "scene" | "journey" => {
+                ui.label("payload (files relative to the first scene or journey; JSON settings after |)");
+                changed |= ui.text_edit_singleline(data).changed();
+            }
+            "next" | "stop" | "walk" | "finish" => {}
+            _ => {
+                changed |= ui.text_edit_singleline(data).changed();
+                ui.label("Formats: walk · stop · speed:<m/s> · next · choose:left|right · finish · transition:<file>[|json] · fork:<l>|<r>[|json] · scene:<file> · journey:<file>");
+            }
+        }
+        changed
+    }
+
     fn edit_action_scoped(
         ui: &mut egui::Ui,
         action: &mut QuartzAction,
@@ -1076,6 +1131,8 @@ impl QuartzForgeApp {
                 // user has to hand-type a stringly-typed payload.
                 if name.trim() == "background" {
                     changed |= Self::background_plugin_data_editor(ui, data, suggestions);
+                } else if name.trim() == "path_forge" {
+                    changed |= Self::path_forge_plugin_data_editor(ui, data);
                 } else {
                     ui.label("plugin data payload");
                     changed |= ui.text_edit_singleline(data).changed();

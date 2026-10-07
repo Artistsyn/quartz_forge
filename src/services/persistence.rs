@@ -242,6 +242,7 @@ pub fn ensure_runtime_scaffold(state: &EditorProjectState, root: &Path) -> Resul
 
     ensure_gitignore(root)?;
     ensure_cargo_toml(state, root)?;
+    ensure_path_forge_dependency(state, root)?;
     ensure_main_rs(state, root)?;
     ensure_lib_rs(state, root)?;
 
@@ -359,6 +360,43 @@ fn ensure_cargo_toml(state: &EditorProjectState, root: &Path) -> Result<()> {
     );
     std::fs::write(&path, cargo)
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// A scene with a PathForge background needs the `quartz_path_forge` crate
+/// (beside `quartz`, like the `../quartz` dependency) and PathForge optimised in
+/// debug builds, where it is otherwise far too slow to render live. Added to an
+/// existing Cargo.toml once, when a scene first uses it; never removed, since
+/// the file is the user's after it is made.
+fn ensure_path_forge_dependency(state: &EditorProjectState, root: &Path) -> Result<()> {
+    if !state.manifest.scenes.iter().any(|s| s.background.path_forge_active().is_some()) {
+        return Ok(());
+    }
+    let path = root.join("Cargo.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut merged = existing.clone();
+    if !existing.contains("quartz_path_forge") {
+        let dep = "quartz_path_forge = { path = \"../quartz_path_forge\" }\n";
+        match merged.find("[dependencies]\n") {
+            Some(at) => merged.insert_str(at + "[dependencies]\n".len(), dep),
+            None => {
+                if !merged.is_empty() && !merged.ends_with('\n') {
+                    merged.push('\n');
+                }
+                merged.push_str("\n[dependencies]\n");
+                merged.push_str(dep);
+            }
+        }
+    }
+    if !existing.contains("[profile.dev.package.path_forge]") {
+        if !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        merged.push_str("\n# PathForge renders backgrounds on the CPU: optimise it even in debug builds.\n[profile.dev.package.path_forge]\nopt-level = 3\n[profile.dev.package.image]\nopt-level = 3\n[profile.dev.package.png]\nopt-level = 3\n");
+    }
+    if merged == existing {
+        return Ok(());
+    }
+    std::fs::write(&path, merged).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn ensure_main_rs(state: &EditorProjectState, root: &Path) -> Result<()> {

@@ -92,12 +92,10 @@ Quartz Forge MCP speaks JSON-RPC over stdio.
 
 ### 6.1 Build MCP server
 
-Option A: dedicated MCP crate (commonly used in this workspace)
+Option A: the slim MCP crate, without the editor. It is the `quartz_forge` library built with `default-features = false` (the `gui` feature off: no egui, eframe, image or PathForge), so it builds anywhere the codegen does:
 
-```powershell
-Push-Location quartz_forge/mcp_server
-cargo build
-Pop-Location
+```bash
+cargo build --manifest-path quartz_forge/mcp_server/Cargo.toml
 ```
 
 Option B: workspace bin
@@ -127,7 +125,7 @@ Example `.vscode/mcp.json`:
 {
   "servers": {
     "quartz_forge_mcp": {
-      "command": "c:/Users/ArtistRyzenWhite/RProjects/FlowMake/quartz_forge/mcp_server/target/debug/quartz_forge_mcp.exe",
+      "command": "target/debug/quartz_forge_mcp",
       "args": ["--stdio"]
     }
   }

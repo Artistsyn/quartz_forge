@@ -460,6 +460,25 @@ impl QuartzForgeApp {
                             changed = true;
                         }
                     });
+                    // Quick-add for a PathForge background: what a runner game
+                    // does with it (walk on to the next place, take a branch).
+                    if editor_suggestions.path_forge {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("PathForge:");
+                            for (label, data, hint) in [
+                                ("➜ Walk on", "next", "Go on to where the journey leads (a transition, or a fork)"),
+                                ("◀ Take left", "choose:left", "Take the left branch of the fork ahead"),
+                                ("▶ Take right", "choose:right", "Take the right branch of the fork ahead"),
+                                ("■ Stop", "stop", "Stand still (for a fight); flames keep moving"),
+                                ("▶ Walk", "walk", "Walk on again"),
+                            ] {
+                                if ui.button(label).on_hover_text(format!("RunPlugin \"path_forge\" → {data}: {hint}")).clicked() {
+                                    *action = QuartzAction::RunPlugin { name: "path_forge".to_owned(), data: data.to_owned() };
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
                     changed |= Self::edit_action(ui, action, &editor_suggestions);
                 }
             }

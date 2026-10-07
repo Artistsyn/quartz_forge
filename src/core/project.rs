@@ -449,7 +449,13 @@ pub struct BackgroundSpec {
     /// Global tint applied after compositing. [255,255,255] = identity.
     #[serde(default = "default_white_tint")]
     pub tint: [u8; 3],
+    #[serde(default)]
     pub layers: Vec<BackgroundLayerSpec>,
+    /// A PathForge background instead of layers: the `quartz_path_forge`
+    /// plugin walks a PathForge scene or journey onto the background object
+    /// (live, or from exported frames). When set, the layers are not emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_forge: Option<PathForgeBackground>,
     /// When true, author the background THROUGH `BackgroundPlugin`: the plugin
     /// composites + disk-caches the image (heavy starfield/nebula composites
     /// are built once and loaded from disk on later launches), then the
@@ -481,6 +487,16 @@ pub struct BackgroundSpec {
 }
 
 impl BackgroundSpec {
+    /// Enabled and drawn by the PathForge plugin.
+    pub fn path_forge_active(&self) -> Option<&PathForgeBackground> {
+        if self.enabled { self.path_forge.as_ref() } else { None }
+    }
+
+    /// Enabled and composited from layers (not a PathForge background).
+    pub fn layered_active(&self) -> bool {
+        self.enabled && self.path_forge.is_none() && !self.layers.is_empty()
+    }
+
     /// All backgrounds to register, primary first: (key, tint, layers).
     pub fn resolved_backgrounds(&self) -> Vec<NamedBackground> {
         let mut out = vec![NamedBackground {
@@ -536,6 +552,7 @@ impl Default for BackgroundSpec {
             camera_pinned: true,
             tint: [255, 255, 255],
             layers: Vec::new(),
+            path_forge: None,
             use_plugin_cache: false,
             cache_dir: default_bg_cache_dir(),
             background_key: default_bg_key(),
@@ -544,6 +561,51 @@ impl Default for BackgroundSpec {
             per_frame_pull: false,
         }
     }
+}
+
+/// A PathForge background (see `BackgroundSpec::path_forge`). Generated as
+/// `PathForgePlugin::live(..)` or `::frames(..)` from the `quartz_path_forge`
+/// crate, dispatched as `Action::RunPlugin { name: "path_forge", data }`
+/// (`walk`, `stop`, `speed:<m/s>`, `next`, `choose:left|right`, `finish`, …).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PathForgeBackground {
+    /// Relative to the project root: a PathForge scene `.json` or a
+    /// `.journey.json` (live), or what `pf journey --formats png` /
+    /// `pf export --formats png` wrote (frames). Live also takes `preset:<Name>`.
+    pub source: String,
+    #[serde(default)]
+    pub mode: PathForgeMode,
+    /// Live: pixels rendered per frame (the object scales them to its size).
+    #[serde(default = "default_path_forge_size")]
+    pub size: [u32; 2],
+    /// Walking speed in m/s; None walks at each scene's own speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// Live: frames rendered per second at most.
+    #[serde(default = "default_path_forge_fps")]
+    pub render_fps: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PathForgeMode {
+    /// PathForge renders every frame in the game, on a worker thread.
+    #[default]
+    Live,
+    /// Plays exported PNG frames; nothing is rendered on the device.
+    Frames,
+}
+
+impl PathForgeBackground {
+    pub fn new(source: impl Into<String>) -> Self {
+        Self { source: source.into(), mode: PathForgeMode::Live, size: default_path_forge_size(), speed: None, render_fps: default_path_forge_fps() }
+    }
+}
+
+fn default_path_forge_size() -> [u32; 2] {
+    [270, 480]
+}
+fn default_path_forge_fps() -> f32 {
+    30.0
 }
 
 /// An additional named background beyond the primary. Registered with the
@@ -686,6 +748,7 @@ impl PluginRegistration {
             "TerrainCollisionPlugin" => Some("quartz::plugin::terrain_collision::TerrainCollisionPlugin"),
             "GrapplePlugin" => Some("quartz::plugin::grapple::GrapplePlugin"),
             "BackgroundPlugin" => Some("quartz::plugin::background::BackgroundPlugin"),
+            "PathForgePlugin" => Some("quartz_path_forge::PathForgePlugin"),
             "SaveGamePlugin" => Some("quartz::plugin::save_game::SaveGamePlugin"),
             _ => None,
         }
@@ -698,6 +761,7 @@ impl PluginRegistration {
             "TerrainCollisionPlugin" => Some("terrain_collision"),
             "GrapplePlugin" => Some("grapple"),
             "BackgroundPlugin" => Some("background"),
+            "PathForgePlugin" => Some("path_forge"),
             "SaveGamePlugin" => Some("save_game"),
             _ => None,
         }
@@ -709,6 +773,7 @@ impl PluginRegistration {
             "terrain_collision" => Some("TerrainCollisionPlugin"),
             "grapple" => Some("GrapplePlugin"),
             "background" => Some("BackgroundPlugin"),
+            "path_forge" => Some("PathForgePlugin"),
             "save_game" => Some("SaveGamePlugin"),
             _ => None,
         }

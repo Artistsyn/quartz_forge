@@ -26,6 +26,7 @@ Quartz Forge MCP is not just a passive lookup layer. Its purpose is to let Copil
 - `qf_forge_check_parity` - compare quartz_forge domain coverage against Quartz `Action` and `Condition` variants.
 - `qf_spawn_audit` - inspect first-class spawn-only workflow coverage, overlay readiness, and helper routing.
 - `qf_project_lint_layout` - verify the workspace layout matches the expected quartz_forge module and binary boundaries, including external-file `#[path] mod` and `use module::*` generation.
+- `qf_path_forge_background_contract` - how to give a scene a PathForge background (`scenes[i].background.path_forge`: an endless first-person path walked by the quartz_path_forge plugin, live or from exported frames, with transitions, forks and journeys): the field, the generated code, the `path_forge` RunPlugin actions and Plugin conditions, the lint rules and the workflow with PathForge's pf_* tools.
 
 ## Routing Intent
 

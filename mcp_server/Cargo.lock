@@ -183,7 +183,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "quartz_forge_mcp_server"
+name = "quartz_forge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -192,6 +192,14 @@ dependencies = [
  "serde",
  "serde_json",
  "syn",
+]
+
+[[package]]
+name = "quartz_forge_mcp_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "quartz_forge",
 ]
 
 [[package]]

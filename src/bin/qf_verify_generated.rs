@@ -16,6 +16,10 @@
 //! cargo check --manifest-path forge_verify_game/Cargo.toml
 //! ```
 //!
+//! `qf_verify_generated path_forge` writes the same game with a PathForge
+//! background instead (a live journey in assets/backgrounds, plus events that
+//! walk on and choose a branch), which proves the quartz_path_forge emission.
+//!
 //! The second command is the actual verdict — generated code either builds
 //! against quartz/crystalline or the generator is wrong. Nothing in the
 //! editor matters if this gate is red.
@@ -161,6 +165,7 @@ fn main() -> Result<()> {
             render_layer: -100,
             camera_pinned: true,
             tint: [255, 255, 255],
+            path_forge: None,
             // Plugin-cache mode: proves the BackgroundPlugin path (disk cache +
             // current_image pull) links against the engine. Direct mode was
             // already proven earlier this session.
@@ -438,6 +443,30 @@ fn main() -> Result<()> {
             data: "transition:main,dusk,1.5".to_owned(),
         });
         scene.events.push(bg_switch);
+    }
+
+    // PathForge variant: the background walks a journey (dungeon -> forest ->
+    // fork into the pass or the canyon), and keys drive it through RunPlugin.
+    if std::env::args().any(|a| a == "path_forge") {
+        let dir = root.join("assets/backgrounds");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("game.journey.json"), r#"{"version":1,"name":"game","start":"crypt","stops":{
+  "crypt":{"scene":"preset:Stone Dungeon","next":{"Go":{"to":"forest","transition":{}}}},
+  "forest":{"scene":"preset:Forest Path","next":{"Fork":{"left":"pass","right":"canyon","fork":{}}}},
+  "pass":{"scene":"preset:Mountain Pass","next":"End"},
+  "canyon":{"scene":"preset:Desert Canyon","next":"End"}}}"#)?;
+        let scene = &mut state.manifest.scenes[0];
+        let mut pf = quartz_forge::core::project::PathForgeBackground::new("assets/backgrounds/game.journey.json");
+        pf.size = [568, 320]; // the canvas is 16:9
+        pf.render_fps = 24.0;
+        scene.background.path_forge = Some(pf);
+        scene.events.retain(|e| e.name != "background_crossfade");
+        for (key, name, data) in [("N", "walk_on", "next"), ("L", "take_left", "choose:left"), ("R", "take_right", "choose:right"), ("S", "stand_still", "stop"), ("W", "walk", "walk")] {
+            let mut ev = QuartzEventBinding::new(format!("evt_pf_{name}"), name.to_owned(), player());
+            ev.kind = QuartzEventKind::KeyPress { key: key.to_owned(), modifiers: QuartzKeyModifiers::default() };
+            ev.action = Some(QuartzAction::RunPlugin { name: "path_forge".to_owned(), data: data.to_owned() });
+            scene.events.push(ev);
+        }
     }
 
     // The Image background layer emits include_bytes!, so the asset must exist

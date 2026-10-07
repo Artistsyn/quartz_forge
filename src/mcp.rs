@@ -240,6 +240,10 @@ fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Val
             "tool": tool_name,
             "contract": background_plugin_contract(paths)?,
         })),
+        "qf_path_forge_background_contract" => Ok(json!({
+            "tool": tool_name,
+            "contract": path_forge_background_contract(paths),
+        })),
         "qf_project_state_dump" => {
             let project_root = args
                 .get("project_root")
@@ -429,6 +433,14 @@ fn tool_list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "qf_path_forge_background_contract",
+            description: "How to give a scene a PathForge background (an endless first-person path walked by the quartz_path_forge plugin, live or from exported frames, with transitions, forks and journeys): the manifest field to set through qf_project_apply_state, the code it generates, the RunPlugin actions and Plugin conditions that drive it, the lint rules, and the workflow with PathForge's own pf_* tools.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolInfo {
             name: "qf_project_state_dump",
             description: "Load a quartz_forge project and return its structured manifest state plus current sync report so agents can edit project data directly instead of guessing through generated Rust.",
             input_schema: json!({
@@ -611,6 +623,35 @@ fn project_lint_layout(paths: &WorkspacePaths, project_root: Option<&str>) -> Re
                 }
             }
 
+            // PathForgePlugin has no `new()`: it is set up by a PathForge
+            // background, which knows the scene or journey it plays.
+            if scene.required_plugins.iter().any(|r| r.type_name == "PathForgePlugin") {
+                errors.push(format!(
+                    "Scene '{}' lists PathForgePlugin in required_plugins; it is registered by a PathForge background \
+                     (background.path_forge with a source), and the generated PathForgePlugin::new() does not exist.",
+                    scene.name
+                ));
+            }
+            if let Some(pf) = scene.background.path_forge_active() {
+                if pf.source.trim().is_empty() {
+                    errors.push(format!("Scene '{}' has a PathForge background with no source (a scene, .journey.json, export, or preset:<Name>).", scene.name));
+                } else if pf.mode == crate::core::project::PathForgeMode::Frames && pf.source.trim().starts_with("preset:") {
+                    errors.push(format!("Scene '{}': a PathForge background in Frames mode plays exported frames; a preset needs Live mode.", scene.name));
+                } else if !pf.source.trim().starts_with("preset:") && !root.join(pf.source.trim()).exists() {
+                    // The game reads it at run time; missing, the background stays empty.
+                    errors.push(format!("Scene '{}': PathForge background source '{}' does not exist under the project root.", scene.name, pf.source.trim()));
+                }
+                // The frame is stretched onto the background object (the canvas).
+                let canvas = scene.canvas.virtual_width.max(1.0) / scene.canvas.virtual_height.max(1.0);
+                let frame = pf.size[0].max(1) as f32 / pf.size[1].max(1) as f32;
+                if pf.mode == crate::core::project::PathForgeMode::Live && ((frame / canvas).ln()).abs() > 0.1 {
+                    warnings.push(format!(
+                        "Scene '{}': the PathForge background renders {}x{} but the canvas is {}x{}, so the frame is stretched; give it the canvas's shape.",
+                        scene.name, pf.size[0], pf.size[1], scene.canvas.virtual_width, scene.canvas.virtual_height
+                    ));
+                }
+            }
+
             // Plugin-dispatch safety: PluginCall/RunPlugin against a plugin
             // that is never registered compiles and silently no-ops at
             // runtime. Walk the whole scene (events, logic trees, nested
@@ -621,9 +662,13 @@ fn project_lint_layout(paths: &WorkspacePaths, project_root: Option<&str>) -> Re
                 // (dispatch name "background") itself in plugin-cache mode, so
                 // RunPlugin("background", "set:..|transition:..") is covered.
                 let background_registered = dispatch_name == "background"
-                    && scene.background.enabled
+                    && scene.background.layered_active()
                     && scene.background.use_plugin_cache;
+                // A PathForge background registers PathForgePlugin ("path_forge").
+                let path_forge_registered = dispatch_name == "path_forge"
+                    && scene.background.path_forge_active().is_some();
                 let registered = background_registered
+                    || path_forge_registered
                     || scene.required_plugins.iter().any(|reg| {
                         crate::core::project::PluginRegistration::known_dispatch_name(&reg.type_name)
                             .map(|n| n == dispatch_name)
@@ -631,11 +676,13 @@ fn project_lint_layout(paths: &WorkspacePaths, project_root: Option<&str>) -> Re
                             || reg.type_name == dispatch_name
                     });
                 if !registered {
-                    let hint = crate::core::project::PluginRegistration::type_for_dispatch_name(
-                        &dispatch_name,
-                    )
-                    .map(|t| format!(" Add '{t}' to the scene's required_plugins."))
-                    .unwrap_or_default();
+                    let hint = if dispatch_name == "path_forge" {
+                        " Give the scene a PathForge background (background.path_forge); that registers it.".to_owned()
+                    } else {
+                        crate::core::project::PluginRegistration::type_for_dispatch_name(&dispatch_name)
+                            .map(|t| format!(" Add '{t}' to the scene's required_plugins."))
+                            .unwrap_or_default()
+                    };
                     errors.push(format!(
                         "Scene '{}' dispatches to plugin '{}' but never registers it — \
                          this compiles and silently does nothing at runtime.{}",
@@ -1128,6 +1175,57 @@ fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
             "ball_swing_game/src/lib.rs"
         ]
     }))
+}
+
+fn path_forge_background_contract(paths: &WorkspacePaths) -> Value {
+    let crate_dir = paths.root.join("quartz_path_forge");
+    json!({
+        "plugin_crate": {
+            "path": crate_dir.display().to_string(),
+            "installed": crate_dir.join("src/lib.rs").exists(),
+            "readme": crate_dir.join("README.md").display().to_string(),
+            "type": "quartz_path_forge::PathForgePlugin",
+            "dispatch_name": "path_forge",
+        },
+        "manifest_field": {
+            "where": "scenes[i].background (enabled: true) .path_forge",
+            "shape": {"source": "string: relative to the project root; a PathForge scene .json or .journey.json (Live), what `pf journey --formats png` wrote (Frames), or preset:<Name> (Live)",
+                      "mode": "Live | Frames", "size": "[w, h] pixels rendered (Live); give it the canvas's shape", "speed": "m/s or omitted (each scene's own)", "render_fps": "Live, default 30"},
+            "example": {"enabled": true, "object_id": "background", "render_layer": -100, "camera_pinned": true,
+                        "path_forge": {"source": "assets/backgrounds/game.journey.json", "mode": "Live", "size": [270, 480], "render_fps": 30.0}},
+            "note": "When path_forge is set the layers are ignored. Do NOT add PathForgePlugin to required_plugins; the background registers it.",
+        },
+        "generated_code": [
+            "use quartz_path_forge::PathForgePlugin;",
+            "let mut background = GameObject::build(\"background\").size(W, H).position(0.0, 0.0).layer(-100).screen_space().finish();",
+            "background.unlit = true;   // the frame carries its own lighting",
+            "let __background_path_forge = PathForgePlugin::live(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/backgrounds/game.journey.json\"), \"background\", (270u32, 480u32)).map(|p| p.with_render_fps(30.0));",
+            "match __background_path_forge { Ok(p) => canvas.add_plugin(p), Err(e) => eprintln!(..) }",
+        ],
+        "cargo_toml": "Saving the project adds quartz_path_forge = { path = \"../quartz_path_forge\" } and opt-level 3 for path_forge/image/png in dev builds (the project must sit in synful_quartz/, like ../quartz).",
+        "actions": {
+            "form": "QuartzAction::RunPlugin { name: \"path_forge\", data }",
+            "data": {"next": "go on to where the journey leads (a transition, or a fork)", "choose:left": "take the left branch of the fork ahead", "choose:right": "take the right branch",
+                     "stop": "stand still (flames keep moving)", "walk": "walk on", "speed:3.5": "walking speed m/s", "finish": "cut to the end of the walk under way",
+                     "transition:<file>[|json]": "Live: walk into another scene", "fork:<left>|<right>[|json]": "Live: fork into two scenes", "scene:<file>": "Live: cut", "journey:<file>": "Live: load a journey"},
+        },
+        "conditions": {
+            "form": "QuartzCondition::Plugin { name: \"path_forge\", arg }",
+            "args": {"walking": "walking", "walking_on": "a transition or fork is under way", "fork_ahead": "a fork is coming and nothing is chosen yet (ask the player now)",
+                     "arrived": "true for one tick after reaching a new stop", "ended": "at a stop that leads nowhere", "at:<stop>": "at that journey stop", "scene:<name>": "in that scene"},
+        },
+        "lint": [
+            "RunPlugin \"path_forge\" counts as registered only when the scene has a PathForge background.",
+            "Errors: empty source; Frames mode with preset:; a source file missing under the project root; PathForgePlugin in required_plugins.",
+            "Warning: a Live render size not in the canvas's shape (the frame is stretched).",
+        ],
+        "workflow": [
+            "Design the places with PathForge's MCP (pf_new_scene / pf_edit_scene / pf_contact_sheet), the walks between them with pf_transition, and the whole game's map with pf_journey (op write) into the project's assets/backgrounds/.",
+            "Live: point background.path_forge.source at the .journey.json. Frames: pf_journey op export with formats [\"png\"] into assets/, and point the source at <name>.journey.json there.",
+            "qf_project_apply_state with the background and events (e.g. KeyPress or a gameplay event -> RunPlugin path_forge next; fork_ahead -> show a choice; choose:left/right).",
+            "qf_project_lint_layout, then build the game.",
+        ],
+    })
 }
 
 fn background_plugin_contract(paths: &WorkspacePaths) -> Result<Value> {
@@ -1860,6 +1958,38 @@ fn write_rpc_response(
 
 #[cfg(test)]
 mod tests {
+    /// The slim MCP server (mcp_server/) builds this library with the `gui`
+    /// feature off. Code outside the gui-gated modules must therefore not use
+    /// the gui-only crates, or that build breaks while the editor build (which
+    /// is the one people run) stays green. Gated modules: app, and the three
+    /// preview services (see lib.rs and services/mod.rs).
+    #[test]
+    fn code_outside_the_gui_modules_needs_no_gui_crates() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let gated = ["app", "services/background_preview.rs", "services/lighting_preview.rs", "services/path_forge_preview.rs", "main.rs", "bin/qf_verify_generated.rs"];
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                let rel = p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+                if gated.iter().any(|g| rel == *g || rel.starts_with(&format!("{g}/"))) { continue; }
+                if p.is_dir() { stack.push(p); continue; }
+                if p.extension().is_none_or(|x| x != "rs") { continue; }
+                for (n, line) in std::fs::read_to_string(&p).unwrap().lines().enumerate() {
+                    let code = line.split("//").next().unwrap_or("");
+                    // Crate paths in code, not inside string literals.
+                    let outside_strings: String = code.split('"').step_by(2).collect();
+                    for c in ["egui::", "eframe::", "rfd::", "image::", "path_forge::"] {
+                        let hit = outside_strings.match_indices(c).any(|(k, _)| !outside_strings[..k].ends_with(|ch: char| ch.is_alphanumeric() || ch == '_'));
+                        if hit { offenders.push(format!("src/{rel}:{}: {}", n + 1, line.trim())); }
+                    }
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "gui-only crates used outside the gui modules (gate the module with #[cfg(feature = \"gui\")] or move the code):\n{}", offenders.join("\n"));
+    }
+
     use super::*;
 
     fn test_workspace_paths() -> WorkspacePaths {

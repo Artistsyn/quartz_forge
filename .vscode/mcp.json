@@ -1,7 +1,7 @@
 {
     "servers": {
         "quartz_forge_mcp": {
-            "command": "c:/Users/ArtistRyzenWhite/RProjects/FlowMake/quartz_forge/mcp_server/target/debug/quartz_forge_mcp.exe",
+            "command": "target/debug/quartz_forge_mcp",
             "args": [
                 "--stdio"
             ]

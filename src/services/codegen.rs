@@ -46,7 +46,10 @@ pub fn scene_extra_use_lines(scene: &crate::core::project::SceneDocument) -> Str
                 .map(|p| format!("use {p};\n"))
         })
         .collect();
-    if scene.background.enabled && !scene.background.layers.is_empty() {
+    if scene.background.path_forge_active().is_some() {
+        use_lines.push("use quartz_path_forge::PathForgePlugin;\n".to_owned());
+    }
+    if scene.background.layered_active() {
         // ResizeFilter is only needed when an Image layer is present (quartz
         // re-exports it from the background module).
         let needs_filter = scene
@@ -351,7 +354,10 @@ pub fn scene_camera_lines(scene: &crate::core::project::SceneDocument) -> String
 /// Full-screen composited background object. Renders (unlike BackgroundPlugin).
 pub fn scene_background_lines(scene: &crate::core::project::SceneDocument) -> String {
     let bg = &scene.background;
-    if !bg.enabled || bg.layers.is_empty() {
+    if let Some(pf) = bg.path_forge_active() {
+        return path_forge_background_lines(scene, pf);
+    }
+    if !bg.layered_active() {
         return String::new();
     }
     let (w_lit, h_lit) = (f32_lit(scene.canvas.virtual_width), f32_lit(scene.canvas.virtual_height));
@@ -449,13 +455,69 @@ pub fn scene_background_lines(scene: &crate::core::project::SceneDocument) -> St
     out
 }
 
+/// Where a PathForge source is read from at run time: `preset:<Name>` as is,
+/// anything else relative to the game's folder.
+pub(crate) fn path_forge_source_expr(source: &str) -> String {
+    let s = source.trim();
+    // Presets, and files outside the project (an absolute path), as given.
+    if s.starts_with("preset:") || std::path::Path::new(s).is_absolute() {
+        return rust_str_lit(s);
+    }
+    let rel = s.trim_start_matches("./").trim_start_matches('/').replace('\\', "/");
+    format!("concat!(env!(\"CARGO_MANIFEST_DIR\"), {})", rust_str_lit(&format!("/{rel}")))
+}
+
+/// A PathForge background: the object, then the plugin that keeps its image
+/// showing the walk (the plugin sets the image itself every frame it has a new
+/// one, so no pull is emitted). Opening the scene or journey can fail at run
+/// time (a missing file), and setup returns nothing, so the error is printed.
+fn path_forge_background_lines(scene: &crate::core::project::SceneDocument, pf: &crate::core::project::PathForgeBackground) -> String {
+    use crate::core::project::PathForgeMode;
+    let bg = &scene.background;
+    let id = &bg.object_id;
+    let (w_lit, h_lit) = (f32_lit(scene.canvas.virtual_width), f32_lit(scene.canvas.virtual_height));
+    let mut out = format!(
+        "    let mut {id} = GameObject::build(\"{id}\")\n        .size({w_lit}, {h_lit})\n        .position(0.0, 0.0)\n        .layer({})\n",
+        bg.render_layer
+    );
+    if bg.camera_pinned {
+        out.push_str("        .screen_space()\n");
+    }
+    out.push_str("        .finish();\n");
+    // A PathForge frame carries its own lighting; the game's lights must not
+    // light it again (with lighting on, a lit background came out near black).
+    out.push_str(&format!("    {id}.unlit = true;\n"));
+    out.push_str(&format!("    canvas.add_game_object(\"{id}\".to_owned(), {id});\n"));
+    let src = path_forge_source_expr(&pf.source);
+    let open = match pf.mode {
+        PathForgeMode::Live => format!("PathForgePlugin::live({src}, \"{id}\", ({}u32, {}u32))", pf.size[0].max(2), pf.size[1].max(2)),
+        PathForgeMode::Frames => format!("PathForgePlugin::frames({src}, \"{id}\")"),
+    };
+    let mut with = String::new();
+    if pf.mode == PathForgeMode::Live {
+        with.push_str(&format!(".with_render_fps({})", f32_lit(pf.render_fps)));
+    }
+    if let Some(speed) = pf.speed {
+        with.push_str(&format!(".with_speed({})", f32_lit(speed)));
+    }
+    if with.is_empty() {
+        out.push_str(&format!("    let __{id}_path_forge = {open};\n"));
+    } else {
+        out.push_str(&format!("    let __{id}_path_forge = {open}.map(|p| p{with});\n"));
+    }
+    out.push_str(&format!(
+        "    match __{id}_path_forge {{\n        Ok(p) => canvas.add_plugin(p),\n        Err(e) => eprintln!(\"PathForge background `{id}`: {{e}}\"),\n    }}\n"
+    ));
+    out
+}
+
 /// Per-frame background pull for register_logic — emitted only in plugin-cache
 /// mode with per_frame_pull. Pulls the plugin's current_image() (which the
 /// plugin updates during crossfade transitions) onto the background object
 /// each frame so transitions actually blend on screen.
 pub fn scene_background_update_lines(scene: &crate::core::project::SceneDocument) -> String {
     let bg = &scene.background;
-    if !bg.enabled || bg.layers.is_empty() || !bg.use_plugin_cache || !bg.per_frame_pull {
+    if !bg.layered_active() || !bg.use_plugin_cache || !bg.per_frame_pull {
         return String::new();
     }
     let id = &bg.object_id;

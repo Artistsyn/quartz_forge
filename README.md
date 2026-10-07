@@ -75,12 +75,10 @@ Quartz Forge MCP supports standard JSON-RPC over stdio. This works with VS Code/
 
 ### 1) Build MCP server binary
 
-Option A (recommended in this repo):
+Option A (recommended in this repo): the slim MCP crate, without the editor. It is the `quartz_forge` library built with `default-features = false` (the `gui` feature off: no egui, eframe, image or PathForge), so it builds anywhere the codegen does:
 
-```powershell
-Push-Location quartz_forge/mcp_server
-cargo build
-Pop-Location
+```bash
+cargo build --manifest-path quartz_forge/mcp_server/Cargo.toml
 ```
 
 Option B (workspace crate bin):
@@ -109,7 +107,7 @@ Example local config in `.vscode/mcp.json`:
 {
   "servers": {
     "quartz_forge_mcp": {
-      "command": "c:/Users/ArtistRyzenWhite/RProjects/FlowMake/quartz_forge/mcp_server/target/debug/quartz_forge_mcp.exe",
+      "command": "target/debug/quartz_forge_mcp",
       "args": ["--stdio"]
     }
   }
