@@ -2809,7 +2809,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 [[package]]
 name = "path_forge"
 version = "0.1.0"
-source = "git+https://github.com/Artistsyn/path_forge?branch=pathforge-v3#9132eac9cee252a92c5d18313d228c7c914a42db"
+source = "git+https://github.com/Artistsyn/path_forge?branch=main#a4277de47cf94326db8c68a259b75d235f54ac58"
 dependencies = [
  "base64",
  "gif 0.13.3",

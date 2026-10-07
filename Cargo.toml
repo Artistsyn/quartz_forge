@@ -35,7 +35,7 @@ image = { version = "0.25", default-features = true, optional = true }
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 # PathForge backgrounds: previewed with PathForge's own runtime (no studio, no GPU).
-path_forge = { git = "https://github.com/Artistsyn/path_forge", branch = "pathforge-v3", default-features = false, optional = true }
+path_forge = { git = "https://github.com/Artistsyn/path_forge", branch = "main", default-features = false, optional = true }
 
 # The editor is run as a debug build; PathForge renders on the CPU and needs optimising.
 [profile.dev.package.path_forge]
