@@ -471,6 +471,9 @@ impl QuartzForgeApp {
                                 ("▶ Take right", "choose:right", "Take the right branch of the fork ahead"),
                                 ("■ Stop", "stop", "Stand still (for a fight); flames keep moving"),
                                 ("▶ Walk", "walk", "Walk on again"),
+                                ("☀ Noon", "time:12", "Set the hour to noon on every scene with a sky"),
+                                ("☾ Night", "time:23", "Set the hour to night: stars, moon, lamps lit"),
+                                ("⟳ Days pass", "day:600", "Let a day pass every 10 minutes of play"),
                             ] {
                                 if ui.button(label).on_hover_text(format!("RunPlugin \"path_forge\" → {data}: {hint}")).clicked() {
                                     *action = QuartzAction::RunPlugin { name: "path_forge".to_owned(), data: data.to_owned() };

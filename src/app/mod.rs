@@ -1346,6 +1346,26 @@ impl QuartzForgeApp {
                 changed |= ui.add(egui::Slider::new(&mut pf.render_fps, 6.0..=60.0)).changed();
             });
         }
+        if pf.mode == PathForgeMode::Live {
+            ui.horizontal(|ui| {
+                let mut own = pf.hour.is_none();
+                changed |= ui.checkbox(&mut own, "each scene's own time of day").on_hover_text("Off: start every scene with an open sky at this hour (sun, sky, light, stars, moon and lamps follow it)").changed();
+                if own { pf.hour = None; } else {
+                    let mut v = pf.hour.unwrap_or(12.0);
+                    changed |= ui.add(egui::Slider::new(&mut v, 0.0..=24.0).text("h")).changed();
+                    pf.hour = Some(v);
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut pass = pf.day_seconds.is_some();
+                changed |= ui.checkbox(&mut pass, "days pass").on_hover_text("The hour moves on as the game runs").changed();
+                if !pass { pf.day_seconds = None; } else {
+                    let mut v = pf.day_seconds.unwrap_or(600.0);
+                    changed |= ui.add(egui::Slider::new(&mut v, 10.0..=3600.0).logarithmic(true).text("s per day")).changed();
+                    pf.day_seconds = Some(v);
+                }
+            });
+        }
         ui.horizontal(|ui| {
             let mut own = pf.speed.is_none();
             changed |= ui.checkbox(&mut own, "each scene's own walking speed").changed();
@@ -1356,7 +1376,7 @@ impl QuartzForgeApp {
             }
         });
         ui.separator();
-        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · at:<stop>.");
+        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish · time:<hour>|off · day:<seconds>; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · at:<stop> · night · day · dawn · dusk.");
         changed
     }
 
@@ -1411,6 +1431,16 @@ impl QuartzForgeApp {
                 s.progress.map(|x| format!(" · walking on {:.0}%", x * 100.0)).unwrap_or_default(),
                 s.choose_within.map(|x| format!(" · choose within {x:.0} m")).unwrap_or_default(),
             ));
+        }
+        if let Some(d) = p.day() {
+            ui.horizontal(|ui| {
+                let (h, m) = (d.hour.floor() as u32, ((d.hour.fract()) * 60.0) as u32);
+                ui.small(format!("{} {h:02}:{m:02} · {} · daylight {:.0}%", if d.is_day { "☀" } else { "☾" }, d.phase, d.daylight * 100.0));
+                let mut v = d.hour;
+                if ui.add(egui::Slider::new(&mut v, 0.0..=24.0).show_value(false)).on_hover_text("Preview only: what RunPlugin path_forge time:<hour> does").changed() {
+                    p.set_hour(Some(v));
+                }
+            });
         }
         if let Some(n) = &p.note { ui.small(n.clone()); }
         if !p.stops.is_empty() {

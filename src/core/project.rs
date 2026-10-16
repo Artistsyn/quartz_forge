@@ -584,6 +584,15 @@ pub struct PathForgeBackground {
     /// Live: frames rendered per second at most.
     #[serde(default = "default_path_forge_fps")]
     pub render_fps: f32,
+    /// Live: the hour of the day to start at (0..24: 6 sunrise, 12 noon, 18
+    /// sunset, 0 midnight), set on every scene with an open sky; None keeps
+    /// each scene's own. Events change it with `time:<hour>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hour: Option<f32>,
+    /// Live: real seconds one in-game day lasts, so the days pass as the game
+    /// runs; None holds the hour. Events change it with `day:<seconds>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day_seconds: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -597,7 +606,7 @@ pub enum PathForgeMode {
 
 impl PathForgeBackground {
     pub fn new(source: impl Into<String>) -> Self {
-        Self { source: source.into(), mode: PathForgeMode::Live, size: default_path_forge_size(), speed: None, render_fps: default_path_forge_fps() }
+        Self { source: source.into(), mode: PathForgeMode::Live, size: default_path_forge_size(), speed: None, render_fps: default_path_forge_fps(), hour: None, day_seconds: None }
     }
 }
 

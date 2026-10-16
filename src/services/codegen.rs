@@ -500,6 +500,14 @@ fn path_forge_background_lines(scene: &crate::core::project::SceneDocument, pf: 
     if let Some(speed) = pf.speed {
         with.push_str(&format!(".with_speed({})", f32_lit(speed)));
     }
+    if pf.mode == PathForgeMode::Live {
+        if let Some(h) = pf.hour {
+            with.push_str(&format!(".with_hour({})", f32_lit(h)));
+        }
+        if let Some(d) = pf.day_seconds {
+            with.push_str(&format!(".with_day_length({})", f32_lit(d)));
+        }
+    }
     if with.is_empty() {
         out.push_str(&format!("    let __{id}_path_forge = {open};\n"));
     } else {

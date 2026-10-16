@@ -72,7 +72,26 @@ impl PathForgePreview {
             PathForgeMode::Frames => frames_of(&path),
         };
         match res { Ok(s) => me.source = s, Err(e) => me.error = Some(e) }
+        if let Source::Live(rt) = &mut me.source {
+            if pf.hour.is_some() { rt.set_hour(pf.hour); }
+            if let Some(d) = pf.day_seconds { rt.set_day_length(d); }
+        }
         me
+    }
+
+    /// The game's `time:<hour>` (None: `time:off`, each scene's own).
+    pub fn set_hour(&mut self, hour: Option<f32>) {
+        if let Source::Live(rt) = &mut self.source { rt.set_hour(hour); }
+    }
+
+    /// The game's `day:<seconds>`: one in-game day every `seconds` (0 holds the hour).
+    pub fn set_day_length(&mut self, seconds: f32) {
+        if let Source::Live(rt) = &mut self.source { rt.set_day_length(seconds); }
+    }
+
+    /// Where the day stands, when the scene has a day and night or the hour is set.
+    pub fn day(&self) -> Option<path_forge::scene::DayState> {
+        match &self.source { Source::Live(rt) => rt.day(), _ => None }
     }
 
     /// Still the preview of `pf` (same file and mode)?
@@ -173,6 +192,21 @@ mod tests {
         for _ in 0..200 { p.frame(0.25, Some(20.0), 18, 32); }
         assert_eq!(p.state().unwrap().stop.as_deref(), Some("b"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_preview_runs_the_backgrounds_day() {
+        let mut pf = PathForgeBackground::new("preset:Forest Path");
+        assert!(PathForgePreview::open(&pf, None).day().is_none(), "no day and night until asked");
+        pf.hour = Some(12.0);
+        pf.day_seconds = Some(24.0);
+        let mut p = PathForgePreview::open(&pf, None);
+        assert_eq!(p.day().unwrap().phase, "day");
+        for _ in 0..120 { p.frame(0.1, Some(0.0), 9, 16); }
+        assert_eq!(p.day().unwrap().phase, "night", "12 s into a 24 s day it is midnight");
+        p.set_day_length(0.0);
+        p.set_hour(Some(18.1));
+        assert_eq!(p.day().unwrap().phase, "dusk");
     }
 
     #[test]

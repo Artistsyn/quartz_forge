@@ -6920,7 +6920,7 @@ fn background_object_ids_in_fn(func: &ItemFn) -> Vec<String> {
 
 /// A PathForge background's plugin local, as `path_forge_background_lines`
 /// writes it: `let __<id>_path_forge = PathForgePlugin::live(<src>, "<id>",
-/// (w, h))[.map(|p| p.with_render_fps(f).with_speed(s))];` (or `::frames(<src>,
+/// (w, h))[.map(|p| p.with_render_fps(f).with_speed(s).with_hour(h).with_day_length(d))];` (or `::frames(<src>,
 /// "<id>")`). Returns the object id and the spec.
 fn parse_path_forge_local(stmt: &Stmt) -> Option<(String, crate::core::project::PathForgeBackground)> {
     use crate::core::project::{PathForgeBackground, PathForgeMode};
@@ -6969,6 +6969,8 @@ fn parse_path_forge_local(stmt: &Stmt) -> Option<(String, crate::core::project::
         match m.as_str() {
             "with_render_fps" => if let Ok(f) = expr_to_f32(&a) { pf.render_fps = f; },
             "with_speed" => pf.speed = expr_to_f32(&a).ok(),
+            "with_hour" => pf.hour = expr_to_f32(&a).ok(),
+            "with_day_length" => pf.day_seconds = expr_to_f32(&a).ok(),
             _ => {}
         }
     }

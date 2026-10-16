@@ -177,7 +177,8 @@ impl QuartzForgeApp {
 
     /// Structured editor for the PathForge background plugin's `data`
     /// (quartz_path_forge): walk · stop · speed:<m/s> · next · choose:left|right
-    /// · finish, and in live mode scene:/transition:/fork:/journey: with a file.
+    /// · finish · time:<hour>|off · day:<seconds>, and in live mode
+    /// scene:/transition:/fork:/journey: with a file.
     fn path_forge_plugin_data_editor(ui: &mut egui::Ui, data: &mut String) -> bool {
         let mut changed = false;
         let trimmed = data.trim().to_owned();
@@ -191,6 +192,8 @@ impl QuartzForgeApp {
                 ("walk", "walk", "Walk on at the set speed", "walk"),
                 ("speed", "speed", "Walking speed in metres per second", "speed:3.5"),
                 ("finish", "finish", "Cut to the end of the walk under way", "finish"),
+                ("time", "time of day", "Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene with a sky; off gives each scene its own", "time:12"),
+                ("day", "days pass", "Let the days pass: real seconds per in-game day (0 holds the hour)", "day:600"),
                 ("transition", "transition to…", "Live mode: walk into another scene (a file, or preset:Name)", "transition:preset:Forest Path"),
                 ("fork", "fork…", "Live mode: a fork into two scenes", "fork:preset:Mountain Pass|preset:Desert Canyon"),
                 ("scene", "cut to…", "Live mode: show another scene at once", "scene:preset:Forest Path"),
@@ -217,6 +220,27 @@ impl QuartzForgeApp {
                     changed = true;
                 }
             }
+            "time" => {
+                let mut off = arg == "off";
+                let mut v = arg.parse::<f32>().unwrap_or(12.0).rem_euclid(24.0);
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut off, "off (each scene's own)").changed() { changed = true; }
+                    if !off && ui.add(egui::Slider::new(&mut v, 0.0..=24.0).text("h")).changed() { changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    for (label, h) in [("dawn", 6.4), ("noon", 12.0), ("dusk", 18.1), ("night", 23.0)] {
+                        if ui.small_button(label).clicked() { v = h; off = false; changed = true; }
+                    }
+                });
+                if changed { *data = if off { "time:off".to_owned() } else { format!("time:{v}") }; }
+            }
+            "day" => {
+                let mut v = arg.parse::<f32>().unwrap_or(600.0);
+                if ui.add(egui::Slider::new(&mut v, 0.0..=3600.0).text("s per day")).on_hover_text("0 holds the hour").changed() {
+                    *data = format!("day:{v}");
+                    changed = true;
+                }
+            }
             "transition" | "fork" | "scene" | "journey" => {
                 ui.label("payload (files relative to the first scene or journey; JSON settings after |)");
                 changed |= ui.text_edit_singleline(data).changed();
@@ -224,7 +248,7 @@ impl QuartzForgeApp {
             "next" | "stop" | "walk" | "finish" => {}
             _ => {
                 changed |= ui.text_edit_singleline(data).changed();
-                ui.label("Formats: walk · stop · speed:<m/s> · next · choose:left|right · finish · transition:<file>[|json] · fork:<l>|<r>[|json] · scene:<file> · journey:<file>");
+                ui.label("Formats: walk · stop · speed:<m/s> · next · choose:left|right · finish · time:<hour>|off · day:<seconds> · transition:<file>[|json] · fork:<l>|<r>[|json] · scene:<file> · journey:<file>");
             }
         }
         changed
