@@ -687,8 +687,10 @@ mod tests {
         // at runtime; there is nothing to author. TiledStrip repeats an image
         // (a rope style's tile), and effects cannot name an image yet.
         // SolarFront is a sweeping screen effect whose aspect comes from the
-        // quad the caller sizes each frame, not from an object.
-        let not_authorable = ["Image", "AnimatedImage", "OutlineState", "TiledStrip", "SolarFront"];
+        // quad the caller sizes each frame, not from an object. Aurora and
+        // ShopIcon run on a `time` the game's code supplies every frame from
+        // its own clock, which an authored effect has no way to bind.
+        let not_authorable = ["Image", "AnimatedImage", "OutlineState", "TiledStrip", "SolarFront", "Aurora", "ShopIcon"];
         for (name, fields) in &engine {
             if not_authorable.contains(&name.as_str()) {
                 continue;

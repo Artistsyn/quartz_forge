@@ -140,6 +140,11 @@ impl PathForgePreview {
         }
     }
 
+    /// The game's `intro`: the scene's camera flight in again from the top.
+    pub fn restart_intro(&mut self) {
+        if let Source::Live(rt) = &mut self.source { rt.restart_intro(); }
+    }
+
     /// Back to the start.
     pub fn restart(&mut self, pf: &PathForgeBackground, project_root: Option<&Path>) { *self = PathForgePreview::open(pf, project_root); }
 }
@@ -207,6 +212,18 @@ mod tests {
         p.set_day_length(0.0);
         p.set_hour(Some(18.1));
         assert_eq!(p.day().unwrap().phase, "dusk");
+    }
+
+    #[test]
+    fn the_preview_replays_the_intro() {
+        // Waterfall Glen comes down from 22 m over its first 5 seconds.
+        let mut p = PathForgePreview::open(&PathForgeBackground::new("preset:Waterfall Glen"), None);
+        for _ in 0..60 { p.frame(0.1, Some(0.0), 18, 32); }
+        let landed = p.frame(0.1, Some(0.0), 18, 32).unwrap().2;
+        p.restart_intro();
+        let above = p.frame(0.0, Some(0.0), 18, 32).unwrap().2;
+        let diff = landed.iter().zip(&above).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum::<u64>() / landed.len() as u64;
+        assert!(diff > 10, "the flight in did not play again ({diff})");
     }
 
     #[test]

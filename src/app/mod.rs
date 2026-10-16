@@ -1376,7 +1376,7 @@ impl QuartzForgeApp {
             }
         });
         ui.separator();
-        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish · time:<hour>|off · day:<seconds>; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · at:<stop> · night · day · dawn · dusk.");
+        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish · time:<hour>|off · day:<seconds> · intro; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · at:<stop> · night · day · dawn · dusk.");
         changed
     }
 
@@ -1420,6 +1420,7 @@ impl QuartzForgeApp {
                 if ui.add_enabled(fork, egui::Button::new("choose left")).clicked() { p.choose(Branch::Left); }
                 if ui.add_enabled(fork, egui::Button::new("choose right")).clicked() { p.choose(Branch::Right); }
             }
+            if ui.small_button("✈ intro").on_hover_text("What RunPlugin path_forge \"intro\" does: the scene's camera flight in (camera.moves.fly_in) again").clicked() { p.restart_intro(); }
             if ui.small_button("⟲ restart").clicked() { p.restart(pf, root.as_deref()); }
         });
         if let Some(s) = &state {
