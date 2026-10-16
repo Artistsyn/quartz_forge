@@ -1973,7 +1973,7 @@ mod tests {
     #[test]
     fn code_outside_the_gui_modules_needs_no_gui_crates() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let gated = ["app", "services/background_preview.rs", "services/lighting_preview.rs", "services/path_forge_preview.rs", "main.rs", "bin/qf_verify_generated.rs"];
+        let gated = ["app", "plugin", "services/background_preview.rs", "services/lighting_preview.rs", "main.rs", "bin/qf_verify_generated.rs"];
         let mut offenders = Vec::new();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {

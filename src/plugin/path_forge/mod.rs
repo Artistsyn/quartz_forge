@@ -1,20 +1,34 @@
-//! Preview of a PathForge background inside the editor.
+//! The PathForge plugin: previews of PathForge backgrounds in the editor.
 //!
-//! Live mode runs PathForge's own runtime (`path_forge::runtime::Runtime`, the
-//! same renderer the game's plugin uses) at a small size, so the preview is the
-//! game's picture, walking, and a journey can be walked through its stops with
-//! the same "walk on" / "choose a branch" the game's events send. Frames mode
-//! cycles the exported start loop's PNGs.
+//! Live mode runs PathForge's own runtime (the same renderer the game's plugin, quartz_path_forge,
+//! uses) at a small size, so the preview is the game's picture, walking, and a journey can be
+//! walked through its stops with the same "walk on" / "choose a branch" the game's events send.
+//! Frames mode cycles the exported start loop's PNGs.
 //!
-//! path_forge is linked without its studio (no GUI or GPU dependencies); it is
-//! a self-contained library, unlike quartz, so it does not tie the editor to
-//! the engine's state.
+//! PathForge is not a build dependency of the editor. Like quartz's plugins, this folder is
+//! compiled in when it is there (build.rs: `cfg(plugin_path_forge)`), and the runtime is loaded
+//! from PathForge's runtime library (its C interface, `ffi`) when a preview opens: without
+//! PathForge the editor builds and runs, and the preview says how to install it.
+
+mod ffi;
+mod ui;
+
+pub use ffi::{DayState, WalkState};
+pub use ui::Panel;
 
 use crate::core::project::{PathForgeBackground, PathForgeMode};
-use path_forge::journey::Journey;
-use path_forge::runtime::{Runtime, WalkState};
-use path_forge::scene::transition::Branch;
+use ffi::Runtime;
 use std::path::{Path, PathBuf};
+
+/// A branch of a fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Branch { Left, Right }
+impl Branch {
+    pub fn name(self) -> &'static str { match self { Branch::Left => "left", Branch::Right => "right" } }
+}
+
+/// Where PathForge's runtime library was loaded from, or why it could not be.
+pub fn runtime_library() -> Result<PathBuf, String> { ffi::lib().map(|l| l.path.clone()) }
 
 pub struct PathForgePreview {
     /// What this preview was opened from: (resolved source, mode).
@@ -42,15 +56,17 @@ pub fn resolve(pf: &PathForgeBackground, project_root: Option<&Path>) -> PathBuf
     project_root.map(|r| r.join(s)).unwrap_or_else(|| PathBuf::from(s))
 }
 
-fn describe(j: &Journey) -> Vec<String> {
-    use path_forge::journey::Next;
-    j.stops.iter().map(|(id, st)| {
-        let next = match &st.next {
-            Next::End => "end".to_owned(),
-            Next::Go { to, .. } => format!("→ {to}"),
-            Next::Fork { left, right, .. } => format!("fork: left {left} / right {right}"),
+fn describe(j: &ffi::JourneyOutline) -> Vec<String> {
+    j.stops.iter().map(|st| {
+        let n = &st.next;
+        let next = if let Some(to) = n.get("go").and_then(|v| v.as_str()) {
+            format!("→ {to}")
+        } else if let Some(f) = n.get("fork").and_then(|v| v.as_array()) {
+            format!("fork: left {} / right {}", f.first().and_then(|v| v.as_str()).unwrap_or("?"), f.get(1).and_then(|v| v.as_str()).unwrap_or("?"))
+        } else {
+            "end".to_owned()
         };
-        format!("{}{id} ({}) {next}", if *id == j.start { "▶ " } else { "" }, st.scene)
+        format!("{}{} ({}) {next}", if st.id == j.start { "▶ " } else { "" }, st.id, st.scene)
     }).collect()
 }
 
@@ -61,14 +77,13 @@ impl PathForgePreview {
         let text = path.to_string_lossy().into_owned();
         let res: Result<Source, String> = match pf.mode {
             PathForgeMode::Live if text.ends_with(".journey.json") => {
-                if let Ok(j) = Journey::load(&path) {
+                if let Ok(j) = ffi::journey_outline(&path) {
                     me.stops = describe(&j);
-                    let probs = j.problems(path.parent());
-                    if !probs.is_empty() { me.error = Some(probs.join("; ")); }
+                    if !j.problems.is_empty() { me.error = Some(j.problems.join("; ")); }
                 }
-                Runtime::from_journey(&path).map(|r| Source::Live(Box::new(r)))
+                Runtime::open_journey(&path).map(|r| Source::Live(Box::new(r)))
             }
-            PathForgeMode::Live => path_forge::journey::load_place(&text, None).map(|(s, d)| Source::Live(Box::new(Runtime::new(s, d)))),
+            PathForgeMode::Live => Runtime::open_place(&text, None).map(|r| Source::Live(Box::new(r))),
             PathForgeMode::Frames => frames_of(&path),
         };
         match res { Ok(s) => me.source = s, Err(e) => me.error = Some(e) }
@@ -90,8 +105,8 @@ impl PathForgePreview {
     }
 
     /// Where the day stands, when the scene has a day and night or the hour is set.
-    pub fn day(&self) -> Option<path_forge::scene::DayState> {
-        match &self.source { Source::Live(rt) => rt.day(), _ => None }
+    pub fn day(&self) -> Option<DayState> {
+        match &self.source { Source::Live(rt) => rt.state().day, _ => None }
     }
 
     /// Still the preview of `pf` (same file and mode)?
@@ -105,7 +120,7 @@ impl PathForgePreview {
             Source::Live(rt) => {
                 let v = speed.unwrap_or_else(|| rt.state().speed);
                 rt.step(dt, v);
-                Some((w, h, rt.frame(w, h).to_vec()))
+                rt.frame(w, h).map(|px| (w, h, px))
             }
             Source::Frames { files, fps, at, cache } => {
                 *at = (*at + dt * *fps) % files.len().max(1) as f32;
@@ -136,7 +151,7 @@ impl PathForgePreview {
     /// The game's `choose:left|right`.
     pub fn choose(&mut self, b: Branch) {
         if let Source::Live(rt) = &mut self.source {
-            self.note = Some(if rt.choose(b) { format!("took the {} branch", b.name()) } else { "no fork to choose here (or too late)".to_owned() });
+            self.note = Some(if rt.choose(b == Branch::Right) { format!("took the {} branch", b.name()) } else { "no fork to choose here (or too late)".to_owned() });
         }
     }
 
@@ -175,8 +190,17 @@ fn frames_of(path: &Path) -> Result<Source, String> {
 mod tests {
     use super::*;
 
+    /// PathForge is optional: these run where its runtime library is built, and say so where not.
+    fn installed() -> bool {
+        match runtime_library() {
+            Ok(_) => true,
+            Err(e) => { eprintln!("skipped, PathForge not installed: {e}"); false }
+        }
+    }
+
     #[test]
     fn live_preview_walks_a_preset_and_a_journey() {
+        if !installed() { return; }
         let mut p = PathForgePreview::open(&PathForgeBackground::new("preset:Forest Path"), None);
         assert!(p.error.is_none(), "{:?}", p.error);
         let (w, h, px) = p.frame(0.1, None, 27, 48).unwrap();
@@ -201,6 +225,7 @@ mod tests {
 
     #[test]
     fn the_preview_runs_the_backgrounds_day() {
+        if !installed() { return; }
         let mut pf = PathForgeBackground::new("preset:Forest Path");
         assert!(PathForgePreview::open(&pf, None).day().is_none(), "no day and night until asked");
         pf.hour = Some(12.0);
@@ -216,6 +241,7 @@ mod tests {
 
     #[test]
     fn the_preview_replays_the_intro() {
+        if !installed() { return; }
         // Waterfall Glen comes down from 22 m over its first 5 seconds.
         let mut p = PathForgePreview::open(&PathForgeBackground::new("preset:Waterfall Glen"), None);
         for _ in 0..60 { p.frame(0.1, Some(0.0), 18, 32); }

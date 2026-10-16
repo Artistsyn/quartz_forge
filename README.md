@@ -55,6 +55,28 @@ Optional, but useful for local API reference workflows:
 
 Quartz Forge MCP and the in-repo tools do not require any personal `.agent` memory setup or a local Quartz AI cache to function. Those can improve convenience on a developer machine, but they are not part of the baseline requirement for other users.
 
+## Plugins (PathForge and others)
+
+Editor plugins work the way quartz's do: every folder under `src/plugin/` with a `mod.rs` is
+compiled in by `build.rs` (no Cargo features), and deleting a folder builds the editor without
+that plugin. A plugin that works with another program does not make it a build dependency.
+
+- **`src/plugin/path_forge`** previews PathForge backgrounds (`background.path_forge` on a scene).
+  PathForge is *not* needed to build or run Quartz Forge: the plugin loads PathForge's runtime
+  library (`path_forge_runtime`, its C interface) when a preview opens. Without it the preview
+  panel says how to install it; everything else about PathForge backgrounds (the scene field,
+  code generation, import, lint, the `path_forge` actions and conditions, MCP) works regardless.
+  To turn the preview on:
+  1. Have a PathForge checkout beside this one (`path_forge/` next to `quartz_forge/`, or next to
+     the folder it sits in), or set `PATH_FORGE_DIR` to it when building Quartz Forge.
+  2. Build its runtime library there: `cargo build --release -p path_forge_runtime`.
+  Or point `PATH_FORGE_RUNTIME` at a built `libpath_forge_runtime.so` / `.dylib` /
+  `path_forge_runtime.dll`, or put that file beside the Quartz Forge executable. The editor
+  needs PathForge's interface version 2 or later.
+
+Games are the same: only a game with a PathForge background depends on PathForge, through
+`quartz_path_forge` (which code generation adds to that game's Cargo.toml).
+
 ## Run Quartz Forge
 
 From workspace root:
