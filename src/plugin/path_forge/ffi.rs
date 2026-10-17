@@ -24,6 +24,7 @@ type SetF = unsafe extern "C" fn(*mut c_void, f32) -> i32;
 type Intro = unsafe extern "C" fn(*mut c_void) -> i32;
 type Outline = unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> i32;
 type Abi = unsafe extern "C" fn() -> u32;
+type SwingTo = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, usize) -> i32;
 
 pub struct Lib {
     _lib: libloading::Library,
@@ -40,6 +41,8 @@ pub struct Lib {
     set_day_length: SetF,
     restart_intro: Intro,
     outline: Outline,
+    /// Interface 3 and later: the camera swinging between views.
+    swing_to: Option<SwingTo>,
 }
 
 static LIB: OnceLock<Lib> = OnceLock::new();
@@ -98,6 +101,7 @@ unsafe fn load(path: &Path) -> Result<Lib, String> {
         set_day_length: sym!(SetF, "pf_runtime_set_day_length"),
         restart_intro: sym!(Intro, "pf_runtime_restart_intro"),
         outline: sym!(Outline, "pf_journey_outline"),
+        swing_to: if v >= 3 { lib.get::<SwingTo>(b"pf_runtime_swing_to\0").ok().map(|f| *f) } else { None },
         path: path.to_path_buf(),
         _lib: lib,
     })
@@ -136,6 +140,9 @@ pub struct WalkState {
     pub speed: f32,
     pub end: bool,
     pub day: Option<DayState>,
+    /// Seconds left of the intro, or of a swing, while it plays (interface 3).
+    pub intro_left: Option<f32>,
+    pub swing_left: Option<f32>,
 }
 
 /// What `go` planned (`pf_runtime_go_plan`).
@@ -210,6 +217,20 @@ impl Runtime {
     pub fn set_day_length(&mut self, seconds: f32) { unsafe { (self.lib.set_day_length)(self.ptr, seconds) }; }
 
     pub fn restart_intro(&mut self) { unsafe { (self.lib.restart_intro)(self.ptr) }; }
+
+    /// Whether this PathForge can swing the camera (interface 3).
+    pub fn can_swing(&self) -> bool { self.lib.swing_to.is_some() }
+
+    /// Swing the camera to a view by name (`side`, `side_left`, `ahead`, `home`) or JSON.
+    pub fn swing(&mut self, spec: &str) -> Result<(), String> {
+        let f = self.lib.swing_to.ok_or("this PathForge is too old to swing the camera: update and rebuild it")?;
+        let s = cstr(spec)?;
+        let mut err = vec![0 as c_char; 512];
+        match unsafe { f(self.ptr, s.as_ptr(), err.as_mut_ptr(), err.len()) } {
+            0 => Ok(()),
+            _ => Err(unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned()),
+        }
+    }
 }
 
 impl Drop for Runtime {

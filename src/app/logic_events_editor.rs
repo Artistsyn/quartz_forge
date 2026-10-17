@@ -474,7 +474,9 @@ impl QuartzForgeApp {
                                 ("☀ Noon", "time:12", "Set the hour to noon on every scene with a sky"),
                                 ("☾ Night", "time:23", "Set the hour to night: stars, moon, lamps lit"),
                                 ("⟳ Days pass", "day:600", "Let a day pass every 10 minutes of play"),
-                                ("✈ Intro", "intro", "Play the scene's camera flight in again from the top"),
+                                ("✈ Intro", "intro", "Play the scene's intro (flight in, swing in) again from the top"),
+                                ("↷ Side view", "swing:side", "Swing the camera round to a side-scroller's view"),
+                                ("↶ Home view", "swing:home", "Swing the camera back to the scene's own view"),
                             ] {
                                 if ui.button(label).on_hover_text(format!("RunPlugin \"path_forge\" → {data}: {hint}")).clicked() {
                                     *action = QuartzAction::RunPlugin { name: "path_forge".to_owned(), data: data.to_owned() };

@@ -89,7 +89,8 @@ that plugin. A plugin that works with another program does not make it a build d
   2. Build its runtime library there: `cargo build --release -p path_forge_runtime`.
   Or point `PATH_FORGE_RUNTIME` at a built `libpath_forge_runtime.so` / `.dylib` /
   `path_forge_runtime.dll`, or put that file beside the Quartz Forge executable. The editor
-  needs PathForge's interface version 2 or later.
+  needs PathForge's interface version 2 or later; with 3 or later the preview also swings the
+  camera between views (the `swing:` action).
 
 Games are the same: only a game with a PathForge background depends on PathForge, through
 `quartz_path_forge` (which code generation adds to that game's Cargo.toml).

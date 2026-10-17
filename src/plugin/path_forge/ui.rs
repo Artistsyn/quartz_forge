@@ -70,9 +70,17 @@ impl Panel {
                 if ui.add_enabled(fork, egui::Button::new("choose left")).clicked() { p.choose(Branch::Left); }
                 if ui.add_enabled(fork, egui::Button::new("choose right")).clicked() { p.choose(Branch::Right); }
             }
-            if ui.small_button("✈ intro").on_hover_text("What RunPlugin path_forge \"intro\" does: the scene's camera flight in (camera.moves.fly_in) again").clicked() { p.restart_intro(); }
+            if ui.small_button("✈ intro").on_hover_text("What RunPlugin path_forge \"intro\" does: the scene's intro (camera.moves.fly_in, swing_in) again").clicked() { p.restart_intro(); }
             if ui.small_button("⟲ restart").clicked() { p.restart(pf, root.as_deref()); }
         });
+        if p.can_swing() {
+            ui.horizontal(|ui| {
+                ui.small("swing:");
+                for (view, label, what) in [("side", "side", "round to a side-scroller's view from the right"), ("side_left", "side (left)", "round to a side-scroller's view from the left"), ("ahead", "ahead", "round to look down the path"), ("home", "home", "back to the scene's own camera")] {
+                    if ui.small_button(label).on_hover_text(format!("What RunPlugin path_forge \"swing:{view}\" does: the camera {what}")).clicked() { p.swing(view); }
+                }
+            });
+        }
         if let Some(s) = &state {
             ui.small(format!(
                 "{}{} · {:.1} m{}{}",
@@ -82,6 +90,7 @@ impl Panel {
                 s.progress.map(|x| format!(" · walking on {:.0}%", x * 100.0)).unwrap_or_default(),
                 s.choose_within.map(|x| format!(" · choose within {x:.0} m")).unwrap_or_default(),
             ));
+            if let Some(t) = s.intro_left.or(s.swing_left) { ui.small(format!("camera moving: {t:.1} s left (the game holds its controls)")); }
         }
         if let Some(d) = p.day() {
             ui.horizontal(|ui| {

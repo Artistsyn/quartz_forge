@@ -1212,13 +1212,14 @@ fn path_forge_background_contract(paths: &WorkspacePaths) -> Value {
                      "stop": "stand still (flames keep moving)", "walk": "walk on", "speed:3.5": "walking speed m/s", "finish": "cut to the end of the walk under way",
                      "time:<hour>": "Live: set the hour of the day (0..24) on every scene with an open sky: sun, sky, light, fog, stars, moon and lamps follow it", "time:off": "each scene's own hour again",
                      "day:<seconds>": "Live: one in-game day every <seconds> of play (0 holds the hour)",
-                     "intro": "Live: play the scene's camera flight in (camera.moves.fly_in) again from the top",
+                     "intro": "Live: play the scene's intro (its camera flight in and swing in, camera.moves.fly_in / swing_in) again from the top",
+                     "swing:<view>": "Live: swing the camera round to another view and stay there: side / side_left (a side-scroller's), ahead (down the path), home (the scene's own camera), or JSON {view, yaw, side, eye_height, horizon, zoom, seconds, ease, overshoot, orbit, bars}",
                      "transition:<file>[|json]": "Live: walk into another scene", "fork:<left>|<right>[|json]": "Live: fork into two scenes", "scene:<file>": "Live: cut", "journey:<file>": "Live: load a journey"},
         },
         "conditions": {
             "form": "QuartzCondition::Plugin { name: \"path_forge\", arg }",
             "args": {"walking": "walking", "walking_on": "a transition or fork is under way", "fork_ahead": "a fork is coming and nothing is chosen yet (ask the player now)",
-                     "arrived": "true for one tick after reaching a new stop", "ended": "at a stop that leads nowhere", "at:<stop>": "at that journey stop", "scene:<name>": "in that scene",
+                     "arrived": "true for one tick after reaching a new stop", "ended": "at a stop that leads nowhere", "intro": "the scene's intro is playing (hold the player's controls)", "swinging": "a swing is under way", "at:<stop>": "at that journey stop", "scene:<name>": "in that scene",
                      "night": "the sun is down (daylight under 0.2): spawn the night creatures", "day": "full daylight", "dawn": "sunrise is under way", "dusk": "sunset is under way"},
         },
         "lint": [

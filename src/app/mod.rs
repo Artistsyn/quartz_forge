@@ -1377,7 +1377,7 @@ impl QuartzForgeApp {
             }
         });
         ui.separator();
-        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish · time:<hour>|off · day:<seconds> · intro; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · at:<stop> · night · day · dawn · dusk.");
+        ui.label("Drive it from events: RunPlugin \"path_forge\" with walk · stop · speed:3.5 · next · choose:left · choose:right · finish · time:<hour>|off · day:<seconds> · intro · swing:side|ahead|home; conditions Plugin \"path_forge\" fork_ahead · walking_on · arrived · ended · intro · swinging · at:<stop> · night · day · dawn · dusk.");
         changed
     }
 
