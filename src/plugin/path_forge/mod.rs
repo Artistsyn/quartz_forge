@@ -155,9 +155,20 @@ impl PathForgePreview {
         }
     }
 
-    /// The game's `intro`: the scene's camera flight in again from the top.
+    /// The game's `intro`: the scene's intro (its camera flight in and swing in) again from the top.
     pub fn restart_intro(&mut self) {
         if let Source::Live(rt) = &mut self.source { rt.restart_intro(); }
+    }
+
+    /// Whether the preview can swing the camera (a live PathForge new enough).
+    pub fn can_swing(&self) -> bool { matches!(&self.source, Source::Live(rt) if rt.can_swing()) }
+
+    /// The game's `swing:<view>`: the camera round to another view (`side`, `side_left`, `ahead`,
+    /// `home`, or JSON).
+    pub fn swing(&mut self, spec: &str) {
+        if let Source::Live(rt) = &mut self.source {
+            if let Err(e) = rt.swing(spec) { self.note = Some(e); }
+        }
     }
 
     /// Back to the start.
@@ -250,6 +261,23 @@ mod tests {
         let above = p.frame(0.0, Some(0.0), 18, 32).unwrap().2;
         let diff = landed.iter().zip(&above).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum::<u64>() / landed.len() as u64;
         assert!(diff > 10, "the flight in did not play again ({diff})");
+    }
+
+    #[test]
+    fn the_preview_swings_the_camera_round_and_home() {
+        if !installed() { return; }
+        let mut p = PathForgePreview::open(&PathForgeBackground::new("preset:Forest Path"), None);
+        if !p.can_swing() { return; }
+        let ahead = p.frame(0.1, Some(0.0), 32, 18).unwrap().2;
+        p.swing(r#"{"view": "side", "seconds": 1}"#);
+        assert!(p.note.is_none(), "{:?}", p.note);
+        assert!(p.state().unwrap().swing_left.is_some());
+        for _ in 0..12 { p.frame(0.1, Some(0.0), 32, 18); }
+        assert!(p.state().unwrap().swing_left.is_none(), "landed");
+        let side = p.frame(0.0, Some(0.0), 32, 18).unwrap().2;
+        assert!(ahead != side, "the view came round");
+        p.swing("nowhere");
+        assert!(p.note.as_deref().is_some_and(|n| n.contains("nowhere")));
     }
 
     #[test]

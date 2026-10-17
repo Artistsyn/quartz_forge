@@ -177,7 +177,7 @@ impl QuartzForgeApp {
 
     /// Structured editor for the PathForge background plugin's `data`
     /// (quartz_path_forge): walk · stop · speed:<m/s> · next · choose:left|right
-    /// · finish · time:<hour>|off · day:<seconds> · intro, and in live mode
+    /// · finish · time:<hour>|off · day:<seconds> · intro · swing:<view>, and in live mode
     /// scene:/transition:/fork:/journey: with a file.
     fn path_forge_plugin_data_editor(ui: &mut egui::Ui, data: &mut String) -> bool {
         let mut changed = false;
@@ -194,7 +194,8 @@ impl QuartzForgeApp {
                 ("finish", "finish", "Cut to the end of the walk under way", "finish"),
                 ("time", "time of day", "Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene with a sky; off gives each scene its own", "time:12"),
                 ("day", "days pass", "Let the days pass: real seconds per in-game day (0 holds the hour)", "day:600"),
-                ("intro", "replay intro", "Play the scene's camera flight in (camera.moves.fly_in) again from the top", "intro"),
+                ("intro", "replay intro", "Play the scene's intro (camera flight in and swing in) again from the top", "intro"),
+                ("swing", "swing camera", "Live mode: swing the camera round to another view and stay there: side, side_left, ahead, home (the scene's own), or JSON", "swing:side"),
                 ("transition", "transition to…", "Live mode: walk into another scene (a file, or preset:Name)", "transition:preset:Forest Path"),
                 ("fork", "fork…", "Live mode: a fork into two scenes", "fork:preset:Mountain Pass|preset:Desert Canyon"),
                 ("scene", "cut to…", "Live mode: show another scene at once", "scene:preset:Forest Path"),
@@ -249,7 +250,7 @@ impl QuartzForgeApp {
             "next" | "stop" | "walk" | "finish" => {}
             _ => {
                 changed |= ui.text_edit_singleline(data).changed();
-                ui.label("Formats: walk · stop · speed:<m/s> · next · choose:left|right · finish · time:<hour>|off · day:<seconds> · intro · transition:<file>[|json] · fork:<l>|<r>[|json] · scene:<file> · journey:<file>");
+                ui.label("Formats: walk · stop · speed:<m/s> · next · choose:left|right · finish · time:<hour>|off · day:<seconds> · intro · swing:side|side_left|ahead|home|json · transition:<file>[|json] · fork:<l>|<r>[|json] · scene:<file> · journey:<file>");
             }
         }
         changed
