@@ -459,9 +459,10 @@ fn main() -> Result<()> {
         let mut pf = quartz_forge::core::project::PathForgeBackground::new("assets/backgrounds/game.journey.json");
         pf.size = [568, 320]; // the canvas is 16:9
         pf.render_fps = 24.0;
+        pf.engine = quartz_forge::core::project::PathForgeEngine::Gpu;
         scene.background.path_forge = Some(pf);
         scene.events.retain(|e| e.name != "background_crossfade");
-        for (key, name, data) in [("N", "walk_on", "next"), ("L", "take_left", "choose:left"), ("R", "take_right", "choose:right"), ("S", "stand_still", "stop"), ("W", "walk", "walk")] {
+        for (key, name, data) in [("N", "walk_on", "next"), ("L", "take_left", "choose:left"), ("R", "take_right", "choose:right"), ("S", "stand_still", "stop"), ("W", "walk", "walk"), ("B", "step_back", "speed:-2"), ("C", "draw_on_cpu", "engine:cpu")] {
             let mut ev = QuartzEventBinding::new(format!("evt_pf_{name}"), name.to_owned(), player());
             ev.kind = QuartzEventKind::KeyPress { key: key.to_owned(), modifiers: QuartzKeyModifiers::default() };
             ev.action = Some(QuartzAction::RunPlugin { name: "path_forge".to_owned(), data: data.to_owned() });

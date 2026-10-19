@@ -1190,7 +1190,7 @@ fn path_forge_background_contract(paths: &WorkspacePaths) -> Value {
         "manifest_field": {
             "where": "scenes[i].background (enabled: true) .path_forge",
             "shape": {"source": "string: relative to the project root; a PathForge scene .json or .journey.json (Live), what `pf journey --formats png` wrote (Frames), or preset:<Name> (Live)",
-                      "mode": "Live | Frames", "size": "[w, h] pixels rendered (Live); give it the canvas's shape", "speed": "m/s or omitted (each scene's own)", "render_fps": "Live, default 30",
+                      "mode": "Live | Frames", "size": "[w, h] pixels rendered (Live); give it the canvas's shape", "speed": "m/s or omitted (each scene's own)", "render_fps": "Live: frames per second at most; 0 = the plugin's own (60 on the GPU, 30 on the CPU); a manifest without it means 30", "engine": "Live: Auto (default: the GPU when there is one, else the CPU) | Gpu | Cpu",
                       "hour": "Live: the hour of the day to start at (0..24; 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene with an open sky, or omitted (each scene's own sky.day_night)",
                       "day_seconds": "Live: real seconds per in-game day so the days pass as the game runs, or omitted (the hour holds)"},
             "example": {"enabled": true, "object_id": "background", "render_layer": -100, "camera_pinned": true,
@@ -1202,7 +1202,7 @@ fn path_forge_background_contract(paths: &WorkspacePaths) -> Value {
             "let mut background = GameObject::build(\"background\").size(W, H).position(0.0, 0.0).layer(-100).screen_space().finish();",
             "background.unlit = true;   // the frame carries its own lighting",
             "let __background_path_forge = PathForgePlugin::live(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/backgrounds/game.journey.json\"), \"background\", (270u32, 480u32)).map(|p| p.with_render_fps(30.0));",
-            "// with hour / day_seconds set: .map(|p| p.with_render_fps(30.0).with_hour(19.5).with_day_length(600.0))",
+            "// with hour / day_seconds set: .map(|p| p.with_render_fps(30.0).with_hour(19.5).with_day_length(600.0)); render_fps 0 leaves out with_render_fps; engine Gpu/Cpu adds .with_engine(quartz_path_forge::Engine::Cpu)",
             "match __background_path_forge { Ok(p) => canvas.add_plugin(p), Err(e) => eprintln!(..) }",
         ],
         "cargo_toml": "Saving the project adds quartz_path_forge = { path = \"../quartz_path_forge\" } and opt-level 3 for path_forge/image/png in dev builds (the project must sit in synful_quartz/, like ../quartz).",

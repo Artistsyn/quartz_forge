@@ -1341,10 +1341,26 @@ impl QuartzForgeApp {
             if (a / b).ln().abs() > 0.1 {
                 ui.colored_label(egui::Color32::from_rgb(230, 180, 60), format!("⚠ {}×{} is not the canvas's shape ({vw}×{vh}): the frame will be stretched.", pf.size[0], pf.size[1]));
             }
-            ui.small("Smaller renders faster (about 1.4 ms at 135×240, 3.6 ms at 270×480 on a desktop CPU); the object scales it up.");
+            ui.small("Smaller renders faster (on an M4's GPU about 4-5 ms at 480×270, 6-14 ms at 960×540, 19-41 ms at 1920×1080; a scene's pixel style renders small too); the object scales it up.");
             ui.horizontal(|ui| {
                 ui.label("render fps");
-                changed |= ui.add(egui::Slider::new(&mut pf.render_fps, 6.0..=60.0)).changed();
+                let mut auto = pf.render_fps <= 0.0;
+                changed |= ui.checkbox(&mut auto, "auto").on_hover_text("The plugin's own: 60 on the GPU, 30 on the CPU").changed();
+                if auto { pf.render_fps = 0.0; } else {
+                    if pf.render_fps <= 0.0 { pf.render_fps = 30.0; }
+                    changed |= ui.add(egui::Slider::new(&mut pf.render_fps, 6.0..=60.0)).changed();
+                }
+            });
+            ui.horizontal(|ui| {
+                use crate::core::project::PathForgeEngine;
+                ui.label("renderer");
+                for (e, label, tip) in [
+                    (PathForgeEngine::Auto, "auto", "The GPU when there is one, else the CPU"),
+                    (PathForgeEngine::Gpu, "GPU", "The GPU (the CPU when the machine has none)"),
+                    (PathForgeEngine::Cpu, "CPU", "Always the CPU: frames exactly as PathForge exports them"),
+                ] {
+                    changed |= ui.selectable_value(&mut pf.engine, e, label).on_hover_text(tip).changed();
+                }
             });
         }
         if pf.mode == PathForgeMode::Live {

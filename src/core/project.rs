@@ -581,9 +581,13 @@ pub struct PathForgeBackground {
     /// Walking speed in m/s; None walks at each scene's own speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
-    /// Live: frames rendered per second at most.
+    /// Live: frames rendered per second at most; 0 lets the plugin choose (60 on the GPU, 30 on
+    /// the CPU).
     #[serde(default = "default_path_forge_fps")]
     pub render_fps: f32,
+    /// Live: which renderer draws the frames (Auto: the GPU when there is one, else the CPU).
+    #[serde(default, skip_serializing_if = "PathForgeEngine::is_auto")]
+    pub engine: PathForgeEngine,
     /// Live: the hour of the day to start at (0..24: 6 sunrise, 12 noon, 18
     /// sunset, 0 midnight), set on every scene with an open sky; None keeps
     /// each scene's own. Events change it with `time:<hour>`.
@@ -593,6 +597,24 @@ pub struct PathForgeBackground {
     /// runs; None holds the hour. Events change it with `day:<seconds>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub day_seconds: Option<f32>,
+}
+
+/// Which renderer a live PathForge background draws with (`quartz_path_forge::Engine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PathForgeEngine {
+    /// The GPU when there is an adapter, else the CPU.
+    #[default]
+    Auto,
+    /// The GPU (the CPU when there is none).
+    Gpu,
+    /// Always the CPU: frames exactly as PathForge exports them.
+    Cpu,
+}
+
+impl PathForgeEngine {
+    pub fn is_auto(&self) -> bool { *self == PathForgeEngine::Auto }
+    /// Its name in `quartz_path_forge::Engine`.
+    pub fn variant(&self) -> &'static str { match self { PathForgeEngine::Auto => "Auto", PathForgeEngine::Gpu => "Gpu", PathForgeEngine::Cpu => "Cpu" } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -606,13 +628,15 @@ pub enum PathForgeMode {
 
 impl PathForgeBackground {
     pub fn new(source: impl Into<String>) -> Self {
-        Self { source: source.into(), mode: PathForgeMode::Live, size: default_path_forge_size(), speed: None, render_fps: default_path_forge_fps(), hour: None, day_seconds: None }
+        Self { source: source.into(), mode: PathForgeMode::Live, size: default_path_forge_size(), speed: None, render_fps: 0.0, engine: PathForgeEngine::Auto, hour: None, day_seconds: None }
     }
 }
 
 fn default_path_forge_size() -> [u32; 2] {
     [270, 480]
 }
+/// A manifest with no `render_fps` keeps the 30 it always meant; new backgrounds start at 0 (the
+/// plugin's own: 60 on the GPU, 30 on the CPU).
 fn default_path_forge_fps() -> f32 {
     30.0
 }

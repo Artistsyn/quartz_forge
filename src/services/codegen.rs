@@ -495,7 +495,13 @@ fn path_forge_background_lines(scene: &crate::core::project::SceneDocument, pf: 
     };
     let mut with = String::new();
     if pf.mode == PathForgeMode::Live {
-        with.push_str(&format!(".with_render_fps({})", f32_lit(pf.render_fps)));
+        // 0: the plugin's own rate (60 on the GPU, 30 on the CPU).
+        if pf.render_fps > 0.0 {
+            with.push_str(&format!(".with_render_fps({})", f32_lit(pf.render_fps)));
+        }
+        if !pf.engine.is_auto() {
+            with.push_str(&format!(".with_engine(quartz_path_forge::Engine::{})", pf.engine.variant()));
+        }
     }
     if let Some(speed) = pf.speed {
         with.push_str(&format!(".with_speed({})", f32_lit(speed)));

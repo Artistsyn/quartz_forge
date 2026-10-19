@@ -4695,7 +4695,10 @@ mod roundtrip_fixed_point_tests {
         let mut frames = PathForgeBackground::new("assets/exports/game.journey.json");
         frames.mode = PathForgeMode::Frames;
         let preset = PathForgeBackground::new("preset:Forest Path");
-        for (n, pf) in [live, frames, preset].into_iter().enumerate() {
+        // The renderer chosen, at the plugin's own frame rate.
+        let mut cpu = PathForgeBackground::new("preset:Ice Cave");
+        cpu.engine = crate::core::project::PathForgeEngine::Cpu;
+        for (n, pf) in [live, frames, preset, cpu].into_iter().enumerate() {
             let root = temp_root(&format!("path_forge_bg_{n}"));
             std::fs::create_dir_all(root.join("src/scenes")).unwrap();
             let rel = "src/scenes/main_scene.rs";
@@ -6968,6 +6971,11 @@ fn parse_path_forge_local(stmt: &Stmt) -> Option<(String, crate::core::project::
     for (m, a) in withs {
         match m.as_str() {
             "with_render_fps" => if let Ok(f) = expr_to_f32(&a) { pf.render_fps = f; },
+            "with_engine" => {
+                use crate::core::project::PathForgeEngine;
+                let name = a.to_token_stream().to_string();
+                pf.engine = match name.rsplit("::").next().map(str::trim) { Some("Gpu") => PathForgeEngine::Gpu, Some("Cpu") => PathForgeEngine::Cpu, _ => PathForgeEngine::Auto };
+            }
             "with_speed" => pf.speed = expr_to_f32(&a).ok(),
             "with_hour" => pf.hour = expr_to_f32(&a).ok(),
             "with_day_length" => pf.day_seconds = expr_to_f32(&a).ok(),
