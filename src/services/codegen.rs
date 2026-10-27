@@ -422,7 +422,7 @@ pub fn scene_background_lines(scene: &crate::core::project::SceneDocument) -> St
             "        if let Some(__{id}_obj) = canvas.get_game_object_mut(\"{id}\") {{\n"
         ));
         out.push_str(&format!(
-            "            __{id}_obj.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_composite.into(), color: None }});\n"
+            "            __{id}_obj.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_composite.into(), color: None, recolor: None }});\n"
         ));
         out.push_str("        }\n    }\n");
     } else {
@@ -448,7 +448,7 @@ pub fn scene_background_lines(scene: &crate::core::project::SceneDocument) -> St
         }
         out.push_str("        .finish();\n");
         out.push_str(&format!(
-            "    {id}.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_img.into(), color: None }});\n"
+            "    {id}.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_img.into(), color: None, recolor: None }});\n"
         ));
         out.push_str(&format!("    canvas.add_game_object(\"{id}\".to_owned(), {id});\n"));
     }
@@ -541,7 +541,7 @@ pub fn scene_background_update_lines(scene: &crate::core::project::SceneDocument
              canvas.on_update(|canvas| {{\n\
                  if let Some(__{id}_frame) = canvas.get_plugin::<BackgroundPlugin>().and_then(|p| p.current_image().cloned()) {{\n\
                      if let Some(__{id}_obj) = canvas.get_game_object_mut(\"{id}\") {{\n\
-                         __{id}_obj.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_frame.into(), color: None }});\n\
+                         __{id}_obj.set_image(Image {{ shape: ShapeType::Rectangle(0.0, ({w_lit}, {h_lit}), 0.0), image: __{id}_frame.into(), color: None, recolor: None }});\n\
                      }}\n\
                  }}\n\
              }});\n"
