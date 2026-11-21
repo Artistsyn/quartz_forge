@@ -52,10 +52,12 @@ pub enum EffectKind {
     DangerZone,
     ProminenceArc,
     PulsarBeam,
+    SoundWall,
+    BladeSweep,
 }
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 18] = [
+    pub const ALL: [EffectKind; 20] = [
         EffectKind::Animated,
         EffectKind::EnergyDome,
         EffectKind::SegmentShield,
@@ -74,6 +76,8 @@ impl EffectKind {
         EffectKind::DangerZone,
         EffectKind::ProminenceArc,
         EffectKind::PulsarBeam,
+        EffectKind::SoundWall,
+        EffectKind::BladeSweep,
     ];
 
     /// The engine variant name.
@@ -97,6 +101,8 @@ impl EffectKind {
             EffectKind::DangerZone => "DangerZone",
             EffectKind::ProminenceArc => "ProminenceArc",
             EffectKind::PulsarBeam => "PulsarBeam",
+            EffectKind::SoundWall => "SoundWall",
+            EffectKind::BladeSweep => "BladeSweep",
         }
     }
 
@@ -125,6 +131,8 @@ impl EffectKind {
             EffectKind::DangerZone => "danger zone",
             EffectKind::ProminenceArc => "prominence arc",
             EffectKind::PulsarBeam => "pulsar beam",
+            EffectKind::SoundWall => "sound wall",
+            EffectKind::BladeSweep => "blade sweep",
         }
     }
 
@@ -147,7 +155,9 @@ impl EffectKind {
             | EffectKind::EnergyWall
             | EffectKind::DangerZone
             | EffectKind::ProminenceArc
-            | EffectKind::PulsarBeam => "intensity",
+            | EffectKind::PulsarBeam
+            | EffectKind::SoundWall
+            | EffectKind::BladeSweep => "intensity",
         }
     }
 
@@ -165,6 +175,8 @@ impl EffectKind {
                 &["stage", "intensity", "progress", "bulge", "thickness", "aspect", "flip"]
             }
             EffectKind::PulsarBeam => &["stage", "intensity", "progress", "sweep"],
+            EffectKind::SoundWall => &["intensity", "flip"],
+            EffectKind::BladeSweep => &["intensity", "progress", "flip"],
             k => std::slice::from_ref(match k {
                 EffectKind::EnergyDome | EffectKind::GravityLens => &"strength",
                 EffectKind::SegmentShield => &"energy",

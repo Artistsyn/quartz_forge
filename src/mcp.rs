@@ -1211,10 +1211,12 @@ fn path_forge_background_contract(paths: &WorkspacePaths) -> Value {
             "data": {"next": "go on to where the journey leads (a transition, or a fork)", "choose:left": "take the left branch of the fork ahead", "choose:right": "take the right branch",
                      "stop": "stand still (flames keep moving)", "walk": "walk on", "speed:3.5": "walking speed m/s", "finish": "cut to the end of the walk under way",
                      "time:<hour>": "Live: set the hour of the day (0..24) on every scene with an open sky: sun, sky, light, fog, stars, moon and lamps follow it", "time:off": "each scene's own hour again",
+                     "time:dawn|noon|dusk|night|midnight": "Live: a named hour (6.4, 12, 18.1, 23, 0)",
                      "day:<seconds>": "Live: one in-game day every <seconds> of play (0 holds the hour)",
                      "intro": "Live: play the scene's intro (its camera flight in and swing in, camera.moves.fly_in / swing_in) again from the top",
                      "swing:<view>": "Live: swing the camera round to another view and stay there: side / side_left (a side-scroller's), ahead (down the path), home (the scene's own camera), or JSON {view, yaw, side, eye_height, horizon, zoom, seconds, ease, overshoot, orbit, bars}",
-                     "transition:<file>[|json]": "Live: walk into another scene", "fork:<left>|<right>[|json]": "Live: fork into two scenes", "scene:<file>": "Live: cut", "journey:<file>": "Live: load a journey"},
+                     "transition:<file>[|json]": "Live: walk into another scene", "fork:<left>|<right>[|json]": "Live: fork into two scenes", "scene:<file>": "Live: cut", "journey:<file>": "Live: load a journey",
+                     "warp:<stop>": "Live: cut to a journey stop at the start of its loop (a shrine to wake at, fast travel); the metres walked carry on"},
         },
         "conditions": {
             "form": "QuartzCondition::Plugin { name: \"path_forge\", arg }",
