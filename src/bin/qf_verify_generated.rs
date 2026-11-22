@@ -33,7 +33,8 @@ use quartz_forge::core::project::{
 use quartz_forge::core::quartz_domain::{
     QuartzAction, QuartzCondition, QuartzEventBinding, QuartzEventKind, QuartzExpr,
     QuartzExprKind, QuartzKeyModifiers, QuartzLocationRef, QuartzMathOp,
-    QuartzObjectBlueprint, QuartzTargetRef, CompareOp,
+    QuartzObjectBlueprint, QuartzTargetRef, CompareOp, LogicNode, LogicTree,
+    QuartzScrollAxisFilter, SceneVariable,
 };
 use quartz_forge::services::{persistence, project_sync};
 
@@ -53,7 +54,8 @@ fn main() -> Result<()> {
         .parent()
         .expect("workspace root")
         .to_path_buf();
-    let root = workspace.join("forge_verify_game");
+    // `QF_VERIFY_ROOT` puts the game elsewhere, to prove a game outside the engine checkout builds.
+    let root = std::env::var_os("QF_VERIFY_ROOT").map_or_else(|| workspace.join("forge_verify_game"), std::path::PathBuf::from);
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
     }
@@ -127,6 +129,7 @@ fn main() -> Result<()> {
                 thickness: 0.1,
                 flip: true,
                 sweep: Some(true),
+                project: None,
             });
             scene.objects.push(o);
         }
@@ -443,7 +446,48 @@ fn main() -> Result<()> {
             data: "transition:main,dusk,1.5".to_owned(),
         });
         scene.events.push(bg_switch);
+
+        // Every action and condition the editor can author, so the code generated for each
+        // must compile against the engine; `quartz_project::samples` fails its own test when
+        // a variant is added without a sample.
+        let samples = quartz_forge::core::samples::Samples {
+            target: player(),
+            other: QuartzTargetRef::Name("ground".to_owned()),
+            template_id: "bullet".to_owned(),
+            animation_asset: "assets/verify_anim.gif".to_owned(),
+        };
+        let mut every = LogicTree::new("tree_every_variant".to_owned(), "every_variant".to_owned());
+        every.nodes = samples.actions().into_iter().map(LogicNode::Action).collect();
+        every.nodes.extend(samples.conditions().into_iter().map(|condition| LogicNode::Branch {
+            condition,
+            then_nodes: vec![LogicNode::Action(QuartzAction::Show { target: player() })],
+            else_nodes: Vec::new(),
+        }));
+        scene.logic_trees.push(every);
+
+        let mut chord = QuartzEventBinding::new("evt_chord".to_owned(), "save_chord".to_owned(), player());
+        chord.kind = QuartzEventKind::KeyPress {
+            key: "s".to_owned(),
+            modifiers: QuartzKeyModifiers { shift: true, control: true, alt: false, meta: false },
+        };
+        chord.action = Some(QuartzAction::Show { target: player() });
+        scene.events.push(chord);
+        let mut scroll = QuartzEventBinding::new("evt_scroll".to_owned(), "zoom_scroll".to_owned(), player());
+        scroll.kind = QuartzEventKind::MouseScroll { axis: QuartzScrollAxisFilter::Y };
+        scroll.action = Some(QuartzAction::AddZoom { value: 0.1 });
+        scene.events.push(scroll);
+
+        let literal = |kind, raw: &str| QuartzExpr { kind, raw: raw.to_owned() };
+        scene.variables = vec![
+            SceneVariable { name: "lives".to_owned(), value: literal(QuartzExprKind::I32, "3") },
+            SceneVariable { name: "speed".to_owned(), value: literal(QuartzExprKind::F32, "2.5") },
+            SceneVariable { name: "muted".to_owned(), value: literal(QuartzExprKind::Bool, "false") },
+            SceneVariable { name: "title".to_owned(), value: literal(QuartzExprKind::Str, "Verify") },
+        ];
     }
+    // The animation the SetAnimation sample embeds (any bytes: it is only compiled in).
+    std::fs::create_dir_all(root.join("assets"))?;
+    std::fs::write(root.join("assets/verify_anim.gif"), b"GIF89a")?;
 
     // PathForge variant: the background walks a journey (dungeon -> forest ->
     // fork into the pass or the canyon), and keys drive it through RunPlugin.

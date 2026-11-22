@@ -8,9 +8,11 @@ use crate::core::object_effect::{
     ScreenEdgeSpec, VFX_FLAG_NAMES,
 };
 use crate::core::quartz_domain::QuartzObjectBlueprint;
+use crate::core::shader_asset::ProjectShaderAsset;
+use super::effects::ProjectChoiceForm;
 
 /// Returns true if anything changed.
-pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectBlueprint) -> bool {
+pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectBlueprint, shaders: &[ProjectShaderAsset]) -> bool {
     let mut changed = false;
     let mut on = object.effect.is_some();
     if ui
@@ -28,12 +30,18 @@ pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectB
     let Some(spec) = object.effect.as_mut() else { return changed };
 
     ui.indent(("effect", id.as_str()), |ui| {
+        let shown = spec.project.as_ref().map_or_else(|| spec.kind.label().to_owned(), |choice| format!("{} (project shader)", choice.shader));
         egui::ComboBox::from_id_salt(("effect_kind", id.as_str()))
-            .selected_text(spec.kind.label())
+            .selected_text(shown)
             .show_ui(ui, |ui| {
                 for kind in EffectKind::ALL {
-                    changed |= ui.selectable_value(&mut spec.kind, kind, kind.label()).changed();
+                    if ui.selectable_label(spec.project.is_none() && spec.kind == kind, kind.label()).clicked() {
+                        spec.kind = kind;
+                        spec.project = None;
+                        changed = true;
+                    }
                 }
+                changed |= ProjectChoiceForm::menu(ui, spec, shaders);
             });
         if spec.kind.is_strip() {
             ui.small("Runs along the object's +x from its left edge; rotate the object to aim it.");
@@ -53,6 +61,10 @@ pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectB
         changed |= ui
             .add(Slider::new(&mut spec.scale[1], 0.05..=8.0).text("height × object"))
             .changed();
+        if spec.project.is_some() {
+            changed |= ProjectChoiceForm::params(ui, spec, shaders);
+            return;
+        }
         changed |= ui
             .add(Slider::new(&mut spec.amount, 0.0..=1.0).text(spec.kind.amount_field()))
             .changed();
@@ -171,7 +183,7 @@ pub(super) fn object_effect_editor(ui: &mut egui::Ui, object: &mut QuartzObjectB
                 }
             });
         }
-        ui.small("Previewed as its bounds in the scene view; the shader itself renders in-game.");
+        ui.small("Drawn by the engine in the scene view (Show effects above it); Play the effect here shows it alone.");
     });
     changed
 }

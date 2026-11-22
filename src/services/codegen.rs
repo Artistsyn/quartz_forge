@@ -3,7 +3,7 @@ use crate::core::quartz_domain::{
     CrystallineConfigProfile, CrystallineQuality, LogicNode, ObjectVisualAssetMode,
     QuartzObjectCollisionMode,
     QuartzAction, QuartzCondition, QuartzEventBinding, QuartzEventKind, QuartzExpr,
-    QuartzExprKind, QuartzMathOp,
+    QuartzExprKind, QuartzMathOp, CompareOp,
 };
 use crate::services::codegen_text::{
     comp_op_expr, key_expr, location_expr, modifiers_expr, mouse_button_expr,
@@ -597,6 +597,7 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
     let Some(scene) = state.manifest.scenes.get(state.active_scene_index) else {
         return "// no active scene".to_owned();
     };
+    let _effects = crate::services::codegen_particles::ParticleCodegen::lend(&state.manifest.particle_effects);
 
     let mut out = String::new();
     out.push_str("use quartz::prelude::*;\n");
@@ -678,6 +679,7 @@ pub fn generate_quartz_preview(state: &EditorProjectState) -> String {
             rust_str_lit(&obj.id),
             obj.id
         ));
+        out.push_str(&crate::services::codegen_particles::ParticleCodegen::object_lines(obj));
     }
 
     // Pre-allocated pools LAST — template factories are defined above.
@@ -970,6 +972,7 @@ pub fn object_registration_body(object: &crate::core::quartz_domain::QuartzObjec
         "    canvas.add_game_object({}.to_owned(), {});\n",
         rust_str_lit(&object.id), object.id
     ));
+    out.push_str(&crate::services::codegen_particles::ParticleCodegen::object_lines(object));
     out
 }
 
@@ -1181,7 +1184,7 @@ fn append_advanced_builder_lines(
             advanced.glow_rgba[1],
             advanced.glow_rgba[2],
             advanced.glow_rgba[3],
-            advanced.glow_width
+            f32_lit(advanced.glow_width)
         ));
     }
 
@@ -1189,12 +1192,12 @@ fn append_advanced_builder_lines(
         if advanced.slope_auto_rotation {
             out.push_str(&format!(
                 "        .slope_auto_rotation({}, {})\n",
-                advanced.slope_left_offset, advanced.slope_right_offset
+                f32_lit(advanced.slope_left_offset), f32_lit(advanced.slope_right_offset)
             ));
         } else {
             out.push_str(&format!(
                 "        .slope({}, {})\n",
-                advanced.slope_left_offset, advanced.slope_right_offset
+                f32_lit(advanced.slope_left_offset), f32_lit(advanced.slope_right_offset)
             ));
         }
     }
@@ -1217,7 +1220,7 @@ fn append_advanced_builder_lines(
         out.push_str("        .align_to_slope()\n");
         out.push_str(&format!(
             "        .align_to_slope_speed({})\n",
-            advanced.align_to_slope_speed
+            f32_lit(advanced.align_to_slope_speed)
         ));
     }
     if advanced.planet_enabled {
@@ -1399,6 +1402,7 @@ pub fn event_binding_body(
     let fallback = event_action_expr(binding);
     let effective_action = selected_tree_action.unwrap_or(fallback);
     let event_expr = event_expr(binding, &action_target, &effective_action);
+    out.push_str(&SpawnTemplates::lets(&event_expr, "    "));
     out.push_str(&format!("    canvas.add_event({}, {});\n", event_expr, outer_target));
     if let Some(tree_id) = &binding.linked_logic_tree_id {
         out.push_str(&format!("    // linked_update_script_id: {}\n", tree_id));
@@ -1622,8 +1626,9 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
         ),
         QuartzAction::SetMaterial { target, material } => {
             format!(
-                "Action::SetMaterial {{ target: {}, material: PhysicsMaterial::new({}, {}, {}) }}",
-                target_expr(target), material.elasticity, material.friction, material.density
+                "Action::SetMaterial {{ target: {}, material: {} }}",
+                target_expr(target),
+                physics_material_expr(material)
             )
         }
         QuartzAction::SetDensity { target, value } => format!(
@@ -1677,10 +1682,13 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
             format!("Action::SetPhysicsQuality {{ quality: {} }}", quality_expr)
         }
         QuartzAction::SetCollisionMode { target, mode } => {
-            let mode_expr = match mode.trim().to_ascii_lowercase().as_str() {
-                "sensor" => "CollisionMode::Sensor",
-                "disabled" => "CollisionMode::Disabled",
-                _ => "CollisionMode::Solid",
+            // The engine's modes, by the names the editor and the live player
+            // (quartz_project_runtime) accept; anything else is solid in both.
+            let mode_expr = match mode.trim().to_ascii_lowercase().replace(['_', '-', ' '], "").as_str() {
+                "nonplatform" => "CollisionMode::non_platform()",
+                "surface" => "CollisionMode::Surface",
+                "solidcircle" | "circle" => "CollisionMode::solid_circle(0.0)",
+                _ => "CollisionMode::solid()",
             };
             format!(
                 "Action::SetCollisionMode {{ target: {}, mode: {} }}",
@@ -1696,15 +1704,15 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
         } => format!(
             "Action::SetSlope {{ target: {}, left_offset: {}, right_offset: {}, auto_rotate: {} }}",
             target_expr(target),
-            left_offset,
-            right_offset,
+            f32_lit(*left_offset),
+            f32_lit(*right_offset),
             auto_rotate
         ),
         QuartzAction::SetSurfaceNormal { target, nx, ny } => format!(
             "Action::SetSurfaceNormal {{ target: {}, nx: {}, ny: {} }}",
             target_expr(target),
-            nx,
-            ny
+            f32_lit(*nx),
+            f32_lit(*ny)
         ),
         QuartzAction::TransferMomentum { from, to, scale } => format!(
             "Action::TransferMomentum {{ from: {}, to: {}, scale: {} }}",
@@ -1712,6 +1720,9 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
             target_expr(to),
             f32_lit(*scale)
         ),
+        QuartzAction::PlayParticles { .. } | QuartzAction::StopParticles { .. } | QuartzAction::RemoveParticles { .. } => {
+            crate::services::codegen_particles::ParticleCodegen::action_expr(action).unwrap_or_default()
+        }
         QuartzAction::SpawnEmitter { name } => format!(
             "Action::SpawnEmitter {{ emitter: EmitterBuilder::new({:?}).build() }}",
             name
@@ -1839,7 +1850,7 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
         ),
         QuartzAction::AddZoom { value } => format!("Action::AddZoom {{ value: {} }}", f32_lit(*value)),
         QuartzAction::SmoothZoomAt { delta } => {
-            format!("Action::SmoothZoomAt {{ delta: {} }}", delta)
+            format!("Action::SmoothZoomAt {{ delta: {} }}", f32_lit(*delta))
         }
         QuartzAction::CameraFlashWith {
             color_rgba,
@@ -1869,7 +1880,7 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
                 mode_expr,
                 ease_expr,
                 f32_lit(*intensity),
-                freeze_frame_s
+                f32_lit(*freeze_frame_s)
             )
         }
         QuartzAction::SetGlow {
@@ -1879,12 +1890,12 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
         } => {
             let [r, g, b] = *color_rgb;
             format!(
-                "Action::SetGlow {{ target: {}, color: Color::from_rgb({}, {}, {}), width: {} }}",
+                "Action::SetGlow {{ target: {}, color: Color({}, {}, {}, 255), width: {} }}",
                 target_expr(target),
                 r,
                 g,
                 b,
-                width
+                f32_lit(*width)
             )
         }
         QuartzAction::ClearGlow { target } => {
@@ -1927,8 +1938,9 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
             f32_lit(*value)
         ),
         QuartzAction::SetGravityFalloff { target, falloff } => {
-            let falloff_expr = match falloff.trim().to_ascii_lowercase().as_str() {
-                "inversesquare" | "inverse_square" | "inverse-square" => "GravityFalloff::InverseSquare",
+            let falloff_expr = match falloff.trim().to_ascii_lowercase().replace(['_', '-'], "").as_str() {
+                "inversesquare" => "GravityFalloff::InverseSquare",
+                "constant" => "GravityFalloff::Constant",
                 _ => "GravityFalloff::Linear",
             };
             format!(
@@ -1963,9 +1975,8 @@ pub(crate) fn action_expr_inner(action: &QuartzAction) -> String {
             quartz_math_op_code(op),
             quartz_expr_to_code(operand)
         ),
-        QuartzAction::Spawn { template_id, location }
-        | QuartzAction::SpawnObject { template_id, location } => format!(
-            "Action::Spawn {{ object: Box::new(spawn_{}(canvas)), location: {} }}",
+        QuartzAction::Spawn { template_id, location } => format!(
+            "Action::Spawn {{ object: Box::new(spawn_{}_template.clone()), location: {} }}",
             template_id,
             location_expr(location)
         ),
@@ -2049,54 +2060,76 @@ fn set_text_value_expr(
     let line_height = font_size * 1.25;
     let font_expr = set_text_font_expr(font_asset_path);
     format!(
-        "{{ let font = {font_expr}; Text::new(vec![Span::new({content:?}.to_owned(), {font_size}f32, Some({line_height}f32), font, Color::from_rgb({r}, {g}, {b}), 0.0)], None, Align::Left, None) }}"
+        "{{ let font = {font_expr}; Text::new(vec![Span::new({content:?}.to_owned(), {font_size}f32, Some({line_height}f32), font, Color({r}, {g}, {b}, 255), 0.0)], None, Align::Left, None) }}"
     )
 }
 
-/// Returns an action expression while preserving the recursive plumbing used by emit_action_lines.
-/// SetText now emits direct Text::new/Span::new expressions, so no prelude is needed.
-fn action_expr_with_prelude(
-    action: &QuartzAction,
-    prelude: &mut Vec<String>,
-    counter: &mut usize,
-) -> String {
-    match action {
-        QuartzAction::Multi { actions } => {
-            let parts = actions
-                .iter()
-                .map(|a| action_expr_with_prelude(a, prelude, counter))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("Action::Multi(vec![{parts}])")
-        }
-        QuartzAction::Conditional { condition, if_true, if_false } => {
-            let if_true_expr = action_expr_with_prelude(if_true, prelude, counter);
-            if let Some(if_false) = if_false {
-                let if_false_expr = action_expr_with_prelude(if_false, prelude, counter);
-                format!(
-                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: Some(Box::new({if_false_expr})) }}",
-                    condition_expr(condition)
-                )
-            } else {
-                format!(
-                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: None }}",
-                    condition_expr(condition)
-                )
+/// The spawn templates an action expression clones (`spawn_<id>_template.clone()`), built on
+/// their own lines before the statement that uses them: `canvas.run(..)` and
+/// `canvas.add_event(..)` already borrow the canvas, so `spawn_<id>(canvas)` cannot sit inside.
+pub struct SpawnTemplates;
+
+impl SpawnTemplates {
+    pub fn lets(action_code: &str, indent: &str) -> String {
+        const OPEN: &str = "Box::new(spawn_";
+        const CLOSE: &str = "_template.clone())";
+        let mut ids: Vec<&str> = Vec::new();
+        let mut rest = action_code;
+        while let Some(start) = rest.find(OPEN) {
+            let after = &rest[start + OPEN.len()..];
+            let Some(end) = after.find(CLOSE) else { break };
+            let id = &after[..end];
+            if !ids.contains(&id) {
+                ids.push(id);
             }
+            rest = &after[end..];
         }
-        other => action_expr_inner(other),
+        ids.iter().map(|id| format!("{indent}let spawn_{id}_template = spawn_{id}(canvas);\n")).collect()
     }
 }
 
 /// Emit the canonical statements for a nodes list inside an on_update/event handler body.
 /// Returns lines to push at the call-site indentation level.
 pub fn emit_action_lines(nodes: &[LogicNode], indent: &str) -> Vec<String> {
-    let mut prelude: Vec<String> = Vec::new();
-    let mut counter = 0usize;
-    let root_action = nodes_to_action_expr_rec(nodes, &mut prelude, &mut counter);
-    let mut lines: Vec<String> = prelude.iter().map(|s| format!("{indent}{s}")).collect();
-    lines.push(format!("{indent}canvas.run({root_action});"));
-    lines
+    TreeStatements::emit(nodes, indent).lines().map(str::to_owned).collect()
+}
+
+/// A logic tree as the statements of a frame: one `canvas.run(..)` per action node and an
+/// `if canvas.check(&..) { .. } else { .. }` per branch, so the code reads as the tree does
+/// and imports back to the same nodes.
+pub struct TreeStatements;
+
+impl TreeStatements {
+    pub fn emit(nodes: &[LogicNode], indent: &str) -> String {
+        if nodes.is_empty() {
+            return format!("{indent}canvas.run(Action::Multi(vec![]));\n");
+        }
+        let mut out = String::new();
+        for node in nodes {
+            Self::emit_node(&mut out, node, indent);
+        }
+        out
+    }
+
+    fn emit_node(out: &mut String, node: &LogicNode, indent: &str) {
+        match node {
+            LogicNode::Action(action) => {
+                let code = action_expr_inner(action);
+                out.push_str(&SpawnTemplates::lets(&code, indent));
+                out.push_str(&format!("{indent}canvas.run({code});\n"));
+            }
+            LogicNode::Branch { condition, then_nodes, else_nodes } => {
+                let inner = format!("{indent}    ");
+                out.push_str(&format!("{indent}if canvas.check(&{}) {{\n", condition_expr(condition)));
+                out.push_str(&Self::emit(then_nodes, &inner));
+                if !else_nodes.is_empty() {
+                    out.push_str(&format!("{indent}}} else {{\n"));
+                    out.push_str(&Self::emit(else_nodes, &inner));
+                }
+                out.push_str(&format!("{indent}}}\n"));
+            }
+        }
+    }
 }
 
 pub fn api_first_static_guard_violations(source: &str) -> Vec<String> {
@@ -2144,50 +2177,6 @@ pub fn api_first_static_guard_violations(source: &str) -> Vec<String> {
     violations
 }
 
-fn nodes_to_action_expr_rec(
-    nodes: &[LogicNode],
-    prelude: &mut Vec<String>,
-    counter: &mut usize,
-) -> String {
-    match nodes {
-        [] => "Action::Multi(vec![])".to_owned(),
-        [single] => node_to_action_expr_rec(single, prelude, counter),
-        many => {
-            let parts = many
-                .iter()
-                .map(|n| node_to_action_expr_rec(n, prelude, counter))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("Action::Multi(vec![{parts}])")
-        }
-    }
-}
-
-fn node_to_action_expr_rec(
-    node: &LogicNode,
-    prelude: &mut Vec<String>,
-    counter: &mut usize,
-) -> String {
-    match node {
-        LogicNode::Action(a) => action_expr_with_prelude(a, prelude, counter),
-        LogicNode::Branch { condition, then_nodes, else_nodes } => {
-            let if_true_expr = nodes_to_action_expr_rec(then_nodes, prelude, counter);
-            if !else_nodes.is_empty() {
-                let if_false_expr = nodes_to_action_expr_rec(else_nodes, prelude, counter);
-                format!(
-                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: Some(Box::new({if_false_expr})) }}",
-                    condition_expr(condition)
-                )
-            } else {
-                format!(
-                    "Action::Conditional {{ condition: {}, if_true: Box::new({if_true_expr}), if_false: None }}",
-                    condition_expr(condition)
-                )
-            }
-        }
-    }
-}
-
 pub(crate) fn condition_expr(condition: &QuartzCondition) -> String {
     match condition {
         QuartzCondition::Always => "Condition::Always".to_owned(),
@@ -2205,7 +2194,7 @@ pub(crate) fn condition_expr(condition: &QuartzCondition) -> String {
         }
         QuartzCondition::CollisionWith { object_a, object_b } => {
             format!(
-                "Condition::And(Box::new(Condition::Collision(Target::name(\"{}\"))), Box::new(Condition::Collision(Target::name(\"{}\"))))",
+                "Condition::CollisionWith(Target::name(\"{}\"), Target::name(\"{}\"))",
                 object_a, object_b
             )
         }
@@ -2213,12 +2202,19 @@ pub(crate) fn condition_expr(condition: &QuartzCondition) -> String {
             variable,
             op,
             value,
-        } => format!(
-            "Condition::Compare(Expr::var(\"{}\"), {}, Expr::f32({}))",
-            variable,
-            comp_op_expr(*op),
-            f32_lit(*value)
-        ),
+        } => {
+            // The method form (`Expr::var(..).gte(..)`) keeps a variable test apart from a
+            // general `Condition::Compare` when the code is imported back.
+            let method = match op {
+                CompareOp::Eq => "eq",
+                CompareOp::Ne => "ne",
+                CompareOp::Lt => "lt",
+                CompareOp::Le => "lte",
+                CompareOp::Gt => "gt",
+                CompareOp::Ge => "gte",
+            };
+            format!("Expr::var({variable:?}).{method}(quartz::Value::F32({}))", f32_lit(*value))
+        }
         QuartzCondition::Compare { left, op, right } => format!(
             "Condition::Compare({}, {}, {})",
             quartz_expr_to_code(left),
@@ -2346,6 +2342,7 @@ fn write_event_binding(
     let fallback = event_action_expr(binding);
     let effective_action = selected_tree_action.unwrap_or(fallback);
     let event_expr = event_expr(binding, &action_target, &effective_action);
+    out.push_str(&SpawnTemplates::lets(&event_expr, &indent));
     out.push_str(&format!("{}canvas.add_event({}, {});\n", indent, event_expr, outer_target));
     if let Some(tree_id) = &binding.linked_logic_tree_id {
         out.push_str(&format!(
@@ -2652,7 +2649,7 @@ mod tests {
         let friction_code = action_expr_inner(&set_friction);
 
         assert!(material_code.contains("Action::SetMaterial"));
-        assert!(material_code.contains("PhysicsMaterial::new("));
+        assert!(material_code.contains("material: PhysicsMaterial"));
         assert!(density_code.contains("Action::SetDensity"));
         assert!(density_code.contains("value: 1.25"));
         assert!(elasticity_code.contains("Action::SetElasticity"));
@@ -2789,7 +2786,8 @@ mod tests {
         assert!(legacy_plugin_code.contains("data: \"refresh\".to_owned()"));
 
         assert!(spawn_code.contains("Action::Spawn"));
-        assert!(spawn_code.contains("Box::new(spawn_enemy(canvas))"));
+        assert!(spawn_code.contains("Box::new(spawn_enemy_template.clone())"));
+        assert_eq!(super::SpawnTemplates::lets(&spawn_code, ""), "let spawn_enemy_template = spawn_enemy(canvas);\n");
     }
 
     #[test]

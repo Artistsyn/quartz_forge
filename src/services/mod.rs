@@ -4,6 +4,9 @@ pub mod codegen;
 #[cfg(feature = "gui")]
 pub mod lighting_preview;
 pub mod codegen_text;
+pub mod codegen_particles;
+pub mod engine_location;
+pub mod gaps;
 pub mod hot_reload;
 pub mod project_import;
 pub mod persistence;

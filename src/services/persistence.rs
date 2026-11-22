@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::services::engine_location::EngineLocation;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::layout::ProjectLayoutPaths;
 use crate::core::project::{EditorProjectState, ProjectManifest};
 use crate::core::quartz_domain::CanvasOrientation;
+use crate::core::store::ProjectStore;
 
 const MANAGED_MAIN_MARKER: &str = "// quartz_forge-managed: main entrypoint";
 const MANAGED_LIB_MARKER: &str = "// quartz_forge-managed: build_app scaffold";
@@ -63,11 +65,7 @@ pub fn create_new_project(project_name: String, root: &Path) -> Result<EditorPro
 }
 
 pub fn load_project(root: &Path) -> Result<EditorProjectState> {
-    let layout = ProjectLayoutPaths::from_root(root);
-    let raw = std::fs::read_to_string(&layout.manifest_path)
-        .with_context(|| format!("failed to read {}", layout.manifest_path.display()))?;
-    let mut manifest: ProjectManifest = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse {}", layout.manifest_path.display()))?;
+    let (mut manifest, _report) = ProjectStore::new(root).load()?;
     manifest.ensure_default_scene();
 
     let active_scene_index = manifest.active_scene_index().unwrap_or(0);
@@ -249,10 +247,10 @@ pub fn ensure_runtime_scaffold(state: &EditorProjectState, root: &Path) -> Resul
     Ok(())
 }
 
+/// The project as data files, one per scene part (`quartz_project::store`): what the engine's
+/// loader, the MCP tools and a person editing by hand all read.
 fn save_manifest(manifest: &ProjectManifest, layout: &ProjectLayoutPaths) -> Result<()> {
-    let content = serde_json::to_string_pretty(manifest).context("failed to serialize manifest")?;
-    std::fs::write(&layout.manifest_path, content)
-        .with_context(|| format!("failed to write {}", layout.manifest_path.display()))
+    ProjectStore::new(&layout.root).save(manifest).map(|_| ())
 }
 
 fn read_sync_snapshot(root: &Path) -> Result<Option<ProjectSyncSnapshot>> {
@@ -344,8 +342,15 @@ fn ensure_gitignore(root: &Path) -> Result<()> {
 }
 
 fn ensure_cargo_toml(state: &EditorProjectState, root: &Path) -> Result<()> {
+    let engine = EngineLocation::find();
+    engine.ensure_shared_target(root)?;
     let path = root.join("Cargo.toml");
     if path.exists() {
+        // A game moved, or made when games had to sit beside the engine: point it back.
+        let existing = std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        if let Some(repaired) = engine.repair_dependencies(root, &existing) {
+            std::fs::write(&path, repaired).with_context(|| format!("failed to write {}", path.display()))?;
+        }
         return Ok(());
     }
 
@@ -355,15 +360,16 @@ fn ensure_cargo_toml(state: &EditorProjectState, root: &Path) -> Result<()> {
     // generated bin fails with E0433. staticlib/cdylib keep mobile targets
     // viable; rlib is what the desktop bin links against.
     let cargo = format!(
-        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"main\"\ncrate-type = [\"staticlib\", \"cdylib\", \"rlib\"]\n\n[dependencies]\nramp = {{ package = \"ramp2\", path = \"../ramp\" }}\nquartz = {{ path = \"../quartz\" }}\n",
-        crate_name
+        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"main\"\ncrate-type = [\"staticlib\", \"cdylib\", \"rlib\"]\n\n[dependencies]\n{}",
+        crate_name,
+        engine.dependency_lines(root)
     );
     std::fs::write(&path, cargo)
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// A scene with a PathForge background needs the `quartz_path_forge` crate
-/// (beside `quartz`, like the `../quartz` dependency) and PathForge optimised in
+/// (from the engine checkout, like `quartz`) and PathForge optimised in
 /// debug builds, where it is otherwise far too slow to render live. Added to an
 /// existing Cargo.toml once, when a scene first uses it; never removed, since
 /// the file is the user's after it is made.
@@ -375,7 +381,8 @@ fn ensure_path_forge_dependency(state: &EditorProjectState, root: &Path) -> Resu
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut merged = existing.clone();
     if !existing.contains("quartz_path_forge") {
-        let dep = "quartz_path_forge = { path = \"../quartz_path_forge\" }\n";
+        let dep = EngineLocation::find().dependency_line(root, "quartz_path_forge", "quartz_path_forge");
+        let dep = dep.as_str();
         match merged.find("[dependencies]\n") {
             Some(at) => merged.insert_str(at + "[dependencies]\n".len(), dep),
             None => {

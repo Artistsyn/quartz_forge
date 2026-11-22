@@ -2,6 +2,7 @@ use eframe::egui::{self, Slider};
 
 use super::QuartzForgeApp;
 use super::EditorSuggestions;
+use super::rules::Catalog;
 use crate::core::quartz_domain::{
     ObjectPhysicsMaterialPreset, ObjectPhysicsMaterialSpec, QuartzAction, QuartzCondition,
     QuartzExpr, QuartzExprKind, QuartzLocationRef, QuartzMathOp, QuartzTargetRef,
@@ -10,28 +11,26 @@ use crate::core::quartz_domain::{
 impl QuartzForgeApp {
     pub(super) fn edit_target_ref(ui: &mut egui::Ui, label: &str, target: &mut QuartzTargetRef) -> bool {
         let mut changed = false;
-        ui.label(label);
-
         let mut mode = match target {
             QuartzTargetRef::Name(_) => "Name",
             QuartzTargetRef::Tag(_) => "Tag",
             QuartzTargetRef::Id(_) => "Id",
         };
-
-        egui::ComboBox::from_label(format!("{label} kind"))
-            .selected_text(mode)
-            .show_ui(ui, |ui| {
-                changed |= ui.selectable_value(&mut mode, "Name", "Name").changed();
-                changed |= ui.selectable_value(&mut mode, "Tag", "Tag").changed();
-                changed |= ui.selectable_value(&mut mode, "Id", "Id").changed();
-            });
-
         let mut value = match target {
             QuartzTargetRef::Name(v) | QuartzTargetRef::Tag(v) | QuartzTargetRef::Id(v) => v.clone(),
         };
-        if ui.text_edit_singleline(&mut value).changed() {
-            changed = true;
-        }
+        ui.horizontal(|ui| {
+            ui.label(label);
+            egui::ComboBox::from_id_salt(format!("{label} kind"))
+                .selected_text(match mode { "Tag" => "Tagged", "Id" => "Id", _ => "Object" })
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    changed |= ui.selectable_value(&mut mode, "Name", "Object").changed();
+                    changed |= ui.selectable_value(&mut mode, "Tag", "Tagged").changed();
+                    changed |= ui.selectable_value(&mut mode, "Id", "Id").changed();
+                });
+            changed |= ui.add(egui::TextEdit::singleline(&mut value).desired_width(140.0)).changed();
+        });
 
         let next_target = match mode {
             "Tag" => QuartzTargetRef::Tag(value),
@@ -323,6 +322,9 @@ impl QuartzForgeApp {
             QuartzAction::SetGravityAllSources { .. } => "SetGravityAllSources",
             QuartzAction::SetAlignToSlope { .. } => "SetAlignToSlope",
             QuartzAction::SetAlignToSlopeSpeed { .. } => "SetAlignToSlopeSpeed",
+            QuartzAction::PlayParticles { .. } => "PlayParticles",
+            QuartzAction::StopParticles { .. } => "StopParticles",
+            QuartzAction::RemoveParticles { .. } => "RemoveParticles",
             QuartzAction::SpawnEmitter { .. } => "SpawnEmitter",
             QuartzAction::RemoveEmitter { .. } => "RemoveEmitter",
             QuartzAction::AttachEmitter { .. } => "AttachEmitter",
@@ -350,322 +352,251 @@ impl QuartzForgeApp {
             QuartzAction::ClearTint { .. } => "ClearTint",
             QuartzAction::SetVar { .. } => "SetVar",
             QuartzAction::ModVar { .. } => "ModVar",
-            QuartzAction::SpawnObject { .. } => "SpawnObject",
             QuartzAction::SetText { .. } => "SetText",
             QuartzAction::Conditional { .. } => "Conditional",
             QuartzAction::Multi { .. } => "Multi",
         };
 
-        egui::ComboBox::from_label("action kind")
-            .selected_text(action_kind)
+        egui::ComboBox::from_label("Step")
+            .selected_text(Catalog::variant_label(action_kind))
             .show_ui(ui, |ui| {
-                changed |= ui.selectable_value(&mut action_kind, "Teleport", "Teleport").changed();
+                changed |= ui.selectable_value(&mut action_kind, "Teleport", Catalog::variant_label("Teleport")).changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "ApplyMomentum", "ApplyMomentum")
+                    .selectable_value(&mut action_kind, "ApplyMomentum", Catalog::variant_label("ApplyMomentum"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetMomentum", "SetMomentum")
+                    .selectable_value(&mut action_kind, "SetMomentum", Catalog::variant_label("SetMomentum"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetResistance", "SetResistance")
+                    .selectable_value(&mut action_kind, "SetResistance", Catalog::variant_label("SetResistance"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetGravity", "SetGravity")
+                    .selectable_value(&mut action_kind, "SetGravity", Catalog::variant_label("SetGravity"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetRotation", "SetRotation")
+                    .selectable_value(&mut action_kind, "SetRotation", Catalog::variant_label("SetRotation"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetPivot", "SetPivot")
+                    .selectable_value(&mut action_kind, "SetPivot", Catalog::variant_label("SetPivot"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "AddRotation", "AddRotation")
+                    .selectable_value(&mut action_kind, "AddRotation", Catalog::variant_label("AddRotation"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "ApplyRotation", "ApplyRotation")
+                    .selectable_value(&mut action_kind, "ApplyRotation", Catalog::variant_label("ApplyRotation"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "SetSize", "SetSize").changed();
+                changed |= ui.selectable_value(&mut action_kind, "SetSize", Catalog::variant_label("SetSize")).changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetCollisionLayer", "SetCollisionLayer")
+                    .selectable_value(&mut action_kind, "SetCollisionLayer", Catalog::variant_label("SetCollisionLayer"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetCameraRelative", "SetCameraRelative")
+                    .selectable_value(&mut action_kind, "SetCameraRelative", Catalog::variant_label("SetCameraRelative"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetRenderLayer", "SetRenderLayer")
+                    .selectable_value(&mut action_kind, "SetRenderLayer", Catalog::variant_label("SetRenderLayer"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "Show", "Show").changed();
-                changed |= ui.selectable_value(&mut action_kind, "Hide", "Hide").changed();
-                changed |= ui.selectable_value(&mut action_kind, "Toggle", "Toggle").changed();
-                changed |= ui.selectable_value(&mut action_kind, "Remove", "Remove").changed();
-                changed |= ui.selectable_value(&mut action_kind, "AddTag", "AddTag").changed();
+                changed |= ui.selectable_value(&mut action_kind, "Show", Catalog::variant_label("Show")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "Hide", Catalog::variant_label("Hide")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "Toggle", Catalog::variant_label("Toggle")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "Remove", Catalog::variant_label("Remove")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "AddTag", Catalog::variant_label("AddTag")).changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "RemoveTag", "RemoveTag")
+                    .selectable_value(&mut action_kind, "RemoveTag", Catalog::variant_label("RemoveTag"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetAnimation", "SetAnimation")
+                    .selectable_value(&mut action_kind, "SetAnimation", Catalog::variant_label("SetAnimation"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "PlaySound", "PlaySound")
+                    .selectable_value(&mut action_kind, "PlaySound", Catalog::variant_label("PlaySound"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "SetZoom", "SetZoom").changed();
+                changed |= ui.selectable_value(&mut action_kind, "SetZoom", Catalog::variant_label("SetZoom")).changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SmoothZoom", "SmoothZoom")
+                    .selectable_value(&mut action_kind, "SmoothZoom", Catalog::variant_label("SmoothZoom"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "PluginCall", "PluginCall")
+                    .selectable_value(&mut action_kind, "PluginCall", Catalog::variant_label("PluginCall"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "RunPlugin", "RunPlugin").changed();
-                changed |= ui.selectable_value(&mut action_kind, "Expr", "Expr").changed();
-                changed |= ui.selectable_value(&mut action_kind, "Custom", "Custom").changed();
+                changed |= ui.selectable_value(&mut action_kind, "RunPlugin", Catalog::variant_label("RunPlugin")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "Expr", Catalog::variant_label("Expr")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "Custom", Catalog::variant_label("Custom")).changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "CameraFlash", "CameraFlash")
+                    .selectable_value(&mut action_kind, "CameraFlash", Catalog::variant_label("CameraFlash"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "CameraShake", "CameraShake")
+                    .selectable_value(&mut action_kind, "CameraShake", Catalog::variant_label("CameraShake"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "CameraZoomPunch", "CameraZoomPunch")
+                    .selectable_value(&mut action_kind, "CameraZoomPunch", Catalog::variant_label("CameraZoomPunch"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetMaterial", "SetMaterial")
+                    .selectable_value(&mut action_kind, "SetMaterial", Catalog::variant_label("SetMaterial"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetDensity", "SetDensity")
+                    .selectable_value(&mut action_kind, "SetDensity", Catalog::variant_label("SetDensity"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetElasticity", "SetElasticity")
+                    .selectable_value(&mut action_kind, "SetElasticity", Catalog::variant_label("SetElasticity"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetFriction", "SetFriction")
+                    .selectable_value(&mut action_kind, "SetFriction", Catalog::variant_label("SetFriction"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "ApplyForce", "ApplyForce")
+                    .selectable_value(&mut action_kind, "ApplyForce", Catalog::variant_label("ApplyForce"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "ApplyImpulse", "ApplyImpulse")
+                    .selectable_value(&mut action_kind, "ApplyImpulse", Catalog::variant_label("ApplyImpulse"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetPosition", "SetPosition")
+                    .selectable_value(&mut action_kind, "SetPosition", Catalog::variant_label("SetPosition"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "FreezeBody", "FreezeBody")
+                    .selectable_value(&mut action_kind, "FreezeBody", Catalog::variant_label("FreezeBody"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "UnfreezeBody", "UnfreezeBody")
+                    .selectable_value(&mut action_kind, "UnfreezeBody", Catalog::variant_label("UnfreezeBody"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "WakeBody", "WakeBody")
+                    .selectable_value(&mut action_kind, "WakeBody", Catalog::variant_label("WakeBody"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetPhysicsQuality", "SetPhysicsQuality")
+                    .selectable_value(&mut action_kind, "SetPhysicsQuality", Catalog::variant_label("SetPhysicsQuality"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetCollisionMode", "SetCollisionMode")
+                    .selectable_value(&mut action_kind, "SetCollisionMode", Catalog::variant_label("SetCollisionMode"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetSlope", "SetSlope")
+                    .selectable_value(&mut action_kind, "SetSlope", Catalog::variant_label("SetSlope"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetSurfaceNormal", "SetSurfaceNormal")
+                    .selectable_value(&mut action_kind, "SetSurfaceNormal", Catalog::variant_label("SetSurfaceNormal"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "TransferMomentum", "TransferMomentum")
+                    .selectable_value(&mut action_kind, "TransferMomentum", Catalog::variant_label("TransferMomentum"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "Spawn", "Spawn").changed();
+                changed |= ui.selectable_value(&mut action_kind, "Spawn", Catalog::variant_label("Spawn")).changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "EnableCrystalline",
-                        "EnableCrystalline",
-                    )
+                    .selectable_value(&mut action_kind, "EnableCrystalline", Catalog::variant_label("EnableCrystalline"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "DisableCrystalline",
-                        "DisableCrystalline",
-                    )
+                    .selectable_value(&mut action_kind, "DisableCrystalline", Catalog::variant_label("DisableCrystalline"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetGravityStrength",
-                        "SetGravityStrength",
-                    )
+                    .selectable_value(&mut action_kind, "SetGravityStrength", Catalog::variant_label("SetGravityStrength"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetPlanetRadius",
-                        "SetPlanetRadius",
-                    )
+                    .selectable_value(&mut action_kind, "SetPlanetRadius", Catalog::variant_label("SetPlanetRadius"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetGravityTarget",
-                        "SetGravityTarget",
-                    )
+                    .selectable_value(&mut action_kind, "SetGravityTarget", Catalog::variant_label("SetGravityTarget"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetGravityInfluenceMult",
-                        "SetGravityInfluenceMult",
-                    )
+                    .selectable_value(&mut action_kind, "SetGravityInfluenceMult", Catalog::variant_label("SetGravityInfluenceMult"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetGravityFalloff",
-                        "SetGravityFalloff",
-                    )
+                    .selectable_value(&mut action_kind, "SetGravityFalloff", Catalog::variant_label("SetGravityFalloff"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetGravityAllSources",
-                        "SetGravityAllSources",
-                    )
+                    .selectable_value(&mut action_kind, "SetGravityAllSources", Catalog::variant_label("SetGravityAllSources"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetAlignToSlope",
-                        "SetAlignToSlope",
-                    )
+                    .selectable_value(&mut action_kind, "SetAlignToSlope", Catalog::variant_label("SetAlignToSlope"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetAlignToSlopeSpeed",
-                        "SetAlignToSlopeSpeed",
-                    )
+                    .selectable_value(&mut action_kind, "SetAlignToSlopeSpeed", Catalog::variant_label("SetAlignToSlopeSpeed"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SpawnEmitter", "SpawnEmitter")
+                    .selectable_value(&mut action_kind, "PlayParticles", Catalog::variant_label("PlayParticles"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "RemoveEmitter", "RemoveEmitter")
+                    .selectable_value(&mut action_kind, "StopParticles", Catalog::variant_label("StopParticles"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "AttachEmitter", "AttachEmitter")
+                    .selectable_value(&mut action_kind, "RemoveParticles", Catalog::variant_label("RemoveParticles"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "DetachEmitter", "DetachEmitter")
+                    .selectable_value(&mut action_kind, "SpawnEmitter", Catalog::variant_label("SpawnEmitter"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetEmitterRate", "SetEmitterRate")
+                    .selectable_value(&mut action_kind, "RemoveEmitter", Catalog::variant_label("RemoveEmitter"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterLifetime",
-                        "SetEmitterLifetime",
-                    )
+                    .selectable_value(&mut action_kind, "AttachEmitter", Catalog::variant_label("AttachEmitter"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterVelocity",
-                        "SetEmitterVelocity",
-                    )
+                    .selectable_value(&mut action_kind, "DetachEmitter", Catalog::variant_label("DetachEmitter"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetEmitterSpread", "SetEmitterSpread")
+                    .selectable_value(&mut action_kind, "SetEmitterRate", Catalog::variant_label("SetEmitterRate"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetEmitterSize", "SetEmitterSize")
+                    .selectable_value(&mut action_kind, "SetEmitterLifetime", Catalog::variant_label("SetEmitterLifetime"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetEmitterColor", "SetEmitterColor")
+                    .selectable_value(&mut action_kind, "SetEmitterVelocity", Catalog::variant_label("SetEmitterVelocity"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterGravityScale",
-                        "SetEmitterGravityScale",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterSpread", Catalog::variant_label("SetEmitterSpread"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterCollision",
-                        "SetEmitterCollision",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterSize", Catalog::variant_label("SetEmitterSize"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterRenderLayer",
-                        "SetEmitterRenderLayer",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterColor", Catalog::variant_label("SetEmitterColor"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterSizeEnd",
-                        "SetEmitterSizeEnd",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterGravityScale", Catalog::variant_label("SetEmitterGravityScale"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterColorEnd",
-                        "SetEmitterColorEnd",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterCollision", Catalog::variant_label("SetEmitterCollision"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetEmitterShape", "SetEmitterShape")
+                    .selectable_value(&mut action_kind, "SetEmitterRenderLayer", Catalog::variant_label("SetEmitterRenderLayer"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterAlignToVelocity",
-                        "SetEmitterAlignToVelocity",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterSizeEnd", Catalog::variant_label("SetEmitterSizeEnd"))
                     .changed();
                 changed |= ui
-                    .selectable_value(
-                        &mut action_kind,
-                        "SetEmitterInterpolatePosition",
-                        "SetEmitterInterpolatePosition",
-                    )
+                    .selectable_value(&mut action_kind, "SetEmitterColorEnd", Catalog::variant_label("SetEmitterColorEnd"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "AddZoom", "AddZoom")
+                    .selectable_value(&mut action_kind, "SetEmitterShape", Catalog::variant_label("SetEmitterShape"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SmoothZoomAt", "SmoothZoomAt")
+                    .selectable_value(&mut action_kind, "SetEmitterAlignToVelocity", Catalog::variant_label("SetEmitterAlignToVelocity"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "CameraFlashWith", "CameraFlashWith")
+                    .selectable_value(&mut action_kind, "SetEmitterInterpolatePosition", Catalog::variant_label("SetEmitterInterpolatePosition"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetGlow", "SetGlow")
+                    .selectable_value(&mut action_kind, "AddZoom", Catalog::variant_label("AddZoom"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "ClearGlow", "ClearGlow")
+                    .selectable_value(&mut action_kind, "SmoothZoomAt", Catalog::variant_label("SmoothZoomAt"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SetTint", "SetTint")
+                    .selectable_value(&mut action_kind, "CameraFlashWith", Catalog::variant_label("CameraFlashWith"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "ClearTint", "ClearTint")
+                    .selectable_value(&mut action_kind, "SetGlow", Catalog::variant_label("SetGlow"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "Conditional", "Conditional")
+                    .selectable_value(&mut action_kind, "ClearGlow", Catalog::variant_label("ClearGlow"))
                     .changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "Multi", "Multi")
+                    .selectable_value(&mut action_kind, "SetTint", Catalog::variant_label("SetTint"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "SetVar", "SetVar").changed();
-                changed |= ui.selectable_value(&mut action_kind, "ModVar", "ModVar").changed();
                 changed |= ui
-                    .selectable_value(&mut action_kind, "SpawnObject", "SpawnObject")
+                    .selectable_value(&mut action_kind, "ClearTint", Catalog::variant_label("ClearTint"))
                     .changed();
-                changed |= ui.selectable_value(&mut action_kind, "SetText", "SetText").changed();
+                changed |= ui
+                    .selectable_value(&mut action_kind, "Conditional", Catalog::variant_label("Conditional"))
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut action_kind, "Multi", Catalog::variant_label("Multi"))
+                    .changed();
+                changed |= ui.selectable_value(&mut action_kind, "SetVar", Catalog::variant_label("SetVar")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "ModVar", Catalog::variant_label("ModVar")).changed();
+                changed |= ui.selectable_value(&mut action_kind, "SetText", Catalog::variant_label("SetText")).changed();
             });
 
         let replacement = match action_kind {
@@ -887,6 +818,14 @@ impl QuartzForgeApp {
                 target: QuartzTargetRef::Name("player".to_owned()),
                 value: 1.0,
             }),
+            "PlayParticles" => Some(QuartzAction::PlayParticles {
+                effect: "fire".to_owned(),
+                name: String::new(),
+                target: None,
+                offset: [0.0, 0.0],
+            }),
+            "StopParticles" => Some(QuartzAction::StopParticles { name: "fire".to_owned() }),
+            "RemoveParticles" => Some(QuartzAction::RemoveParticles { name: "fire".to_owned() }),
             "SpawnEmitter" => Some(QuartzAction::SpawnEmitter {
                 name: "sparkles".to_owned(),
             }),
@@ -1008,10 +947,6 @@ impl QuartzForgeApp {
                 name: "score".to_owned(),
                 op: QuartzMathOp::Add,
                 operand: QuartzExpr { kind: QuartzExprKind::I32, raw: "1".to_owned() },
-            }),
-            "SpawnObject" => Some(QuartzAction::SpawnObject {
-                template_id: "enemy".to_owned(),
-                location: QuartzLocationRef::At { x: 400.0, y: 300.0 },
             }),
             "SetText" => Some(QuartzAction::SetText {
                 target: QuartzTargetRef::Name("label".to_owned()),
@@ -1377,6 +1312,27 @@ impl QuartzForgeApp {
                 changed |= Self::edit_target_ref(ui, "to", to);
                 changed |= ui.add(Slider::new(scale, 0.0..=5.0).text("scale")).changed();
             }
+            QuartzAction::PlayParticles { effect, name, target, offset } => {
+                ui.label("effect (data/effects)");
+                changed |= ui.text_edit_singleline(effect).changed();
+                ui.label("play as (empty: the effect's name)");
+                changed |= ui.text_edit_singleline(name).changed();
+                let mut on_object = target.is_some();
+                if ui.checkbox(&mut on_object, "on an object").changed() {
+                    *target = on_object.then(|| QuartzTargetRef::Name(String::new()));
+                    changed = true;
+                }
+                if let Some(target) = target {
+                    changed |= Self::edit_target_ref(ui, "object", target);
+                }
+                ui.label(if on_object { "offset from its centre" } else { "world position" });
+                changed |= ui.add(egui::DragValue::new(&mut offset[0]).prefix("x ")).changed();
+                changed |= ui.add(egui::DragValue::new(&mut offset[1]).prefix("y ")).changed();
+            }
+            QuartzAction::StopParticles { name } | QuartzAction::RemoveParticles { name } => {
+                ui.label("effect playing as");
+                changed |= ui.text_edit_singleline(name).changed();
+            }
             QuartzAction::SpawnEmitter { name }
             | QuartzAction::RemoveEmitter { name } => {
                 ui.label("emitter name");
@@ -1690,8 +1646,7 @@ impl QuartzForgeApp {
                 if *op != next_op { *op = next_op; changed = true; }
                 Self::edit_quartz_expr(ui, "operand", operand, &mut changed, suggestions);
             }
-            QuartzAction::Spawn { template_id, location }
-            | QuartzAction::SpawnObject { template_id, location } => {
+            QuartzAction::Spawn { template_id, location } => {
                 ui.label("template object id (must be a spawn-only object)");
                 changed |= ui.text_edit_singleline(template_id).changed();
                 match location {

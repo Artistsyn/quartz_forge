@@ -7,7 +7,7 @@ edition = "2024"
 # The editor (egui window, previews). The MCP server and the codegen/import
 # library build without it: `default-features = false` (see mcp_server/).
 default = ["gui"]
-gui = ["dep:eframe", "dep:egui", "dep:rfd", "dep:image", "dep:libloading"]
+gui = ["dep:eframe", "dep:egui", "dep:rfd", "dep:image", "dep:libloading", "dep:wgpu_canvas", "dep:pollster"]
 
 [[bin]]
 name = "quartz_forge"
@@ -24,10 +24,12 @@ name = "quartz_forge_mcp"
 path = "src/bin/quartz_forge_mcp.rs"
 
 [dependencies]
+# The project data (scenes, objects, events) this editor reads and writes; the engine loads it.
+quartz_project = { path = "../quartz_project", features = ["engine"] }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-eframe = { version = "0.29", features = ["wgpu"], optional = true }
-egui = { version = "0.29", optional = true }
+eframe = { version = "0.36", features = ["wgpu"], optional = true }
+egui = { version = "0.36", optional = true }
 rfd = { version = "0.14", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +39,14 @@ quote = "1"
 # PathForge backgrounds are previewed by the PathForge plugin (src/plugin/path_forge), which
 # loads PathForge's runtime library when a preview opens: PathForge is not a build dependency.
 libloading = { version = "0.8", optional = true }
+# The effect preview draws with the engine's own renderer (headless, read back into the editor),
+# so an effect looks in the editor exactly as in the game.
+wgpu_canvas = { path = "../wgpu_canvas", default-features = false, features = ["renderer"], optional = true }
+pollster = { version = "0.4", optional = true }
 
 [profile.dev.package.png]
 opt-level = 3
+
+[dev-dependencies]
+# Headless editor screenshots and clicks (src/app/ui_shots.rs).
+egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }

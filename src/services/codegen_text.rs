@@ -38,7 +38,7 @@ pub(crate) fn modifiers_expr(modifiers: &QuartzKeyModifiers) -> String {
         "None".to_owned()
     } else {
         format!(
-            "Some(Modifiers {{ shift: {}, control: {}, alt: {}, meta: {} }})",
+            "Some(Modifiers {{ shift: {}, ctrl: {}, alt: {}, meta: {} }})",
             modifiers.shift, modifiers.control, modifiers.alt, modifiers.meta
         )
     }
@@ -56,8 +56,8 @@ pub(crate) fn mouse_button_expr(button: QuartzMouseButtonFilter) -> &'static str
 pub(crate) fn scroll_axis_expr(axis: QuartzScrollAxisFilter) -> &'static str {
     match axis {
         QuartzScrollAxisFilter::Any => "None",
-        QuartzScrollAxisFilter::X => "Some(ScrollAxis::X)",
-        QuartzScrollAxisFilter::Y => "Some(ScrollAxis::Y)",
+        QuartzScrollAxisFilter::X => "Some(ScrollAxis::Horizontal)",
+        QuartzScrollAxisFilter::Y => "Some(ScrollAxis::Vertical)",
     }
 }
 
@@ -98,7 +98,9 @@ pub(crate) fn physics_material_expr(material: &ObjectPhysicsMaterialSpec) -> Str
             if let Some((elasticity, friction, density)) = material.to_custom_material() {
                 format!(
                     "PhysicsMaterial {{ elasticity: {}, friction: {}, density: {} }}",
-                    elasticity, friction, density
+                    crate::services::codegen::f32_lit(elasticity),
+                    crate::services::codegen::f32_lit(friction),
+                    crate::services::codegen::f32_lit(density)
                 )
             } else {
                 "PhysicsMaterial::default()".to_owned()

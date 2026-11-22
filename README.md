@@ -209,7 +209,7 @@ For operator-friendly execution, use [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.
 ## Architecture Overview
 
 - `src/app/`: egui editor windows and interaction orchestration
-- `src/core/`: project and Quartz-domain models
+- `../quartz_project` (re-exported as `core`): project and Quartz-domain models, shared with the engine's loader
 - `src/services/`: codegen, import, persistence, sync
 - `src/mcp.rs`: MCP server entry and tool routing
 - `src/bin/quartz_forge_mcp.rs`: MCP bin launcher

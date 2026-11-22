@@ -35,6 +35,7 @@ struct WorkspacePaths {
 struct ToolInfo {
     name: &'static str,
     description: &'static str,
+    #[serde(rename = "inputSchema")]
     input_schema: Value,
 }
 
@@ -201,6 +202,19 @@ fn handle_rpc_request(paths: &WorkspacePaths, request: JsonRpcRequest) -> Result
 }
 
 fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Value> {
+    let data_root = args.get("project_root").and_then(Value::as_str).map(|root| resolve_project_root(paths, root));
+    if let Some(answer) = crate::mcp_gaps::GapTools::call(tool_name, &args) {
+        return answer.map(|report| json!({ "tool": tool_name, "report": report }));
+    }
+    if let Some(answer) = crate::mcp_effects::EffectTools::call(tool_name, &args, data_root.as_deref()) {
+        return answer.map(|report| json!({ "tool": tool_name, "report": report }));
+    }
+    if let Some(answer) = crate::mcp_shaders::ShaderTools::call(tool_name, &args, data_root.as_deref()) {
+        return answer.map(|report| json!({ "tool": tool_name, "report": report }));
+    }
+    if let Some(answer) = crate::mcp_data::DataTools::call(tool_name, &args, data_root) {
+        return answer.map(|report| json!({ "tool": tool_name, "report": report }));
+    }
     match tool_name {
         "qf_api_lookup" => {
             let query = args
@@ -376,7 +390,13 @@ fn call_tool(paths: &WorkspacePaths, tool_name: &str, args: Value) -> Result<Val
 }
 
 fn tool_list() -> Vec<ToolInfo> {
-    vec![
+    let data_tools = crate::mcp_data::DataTools::definitions()
+        .into_iter()
+        .chain(crate::mcp_gaps::GapTools::definitions())
+        .chain(crate::mcp_effects::EffectTools::definitions())
+        .chain(crate::mcp_shaders::ShaderTools::definitions())
+        .map(|(name, description, input_schema)| ToolInfo { name, description, input_schema });
+    let mut tools = vec![
         ToolInfo {
             name: "qf_api_lookup",
             description: "Search local Quartz source and api.txt for exact native API signatures, constructors, and usage notes before custom code is considered.",
@@ -554,7 +574,9 @@ fn tool_list() -> Vec<ToolInfo> {
                 }
             }),
         },
-    ]
+    ];
+    tools.extend(data_tools);
+    tools
 }
 
 fn project_lint_layout(paths: &WorkspacePaths, project_root: Option<&str>) -> Result<Value> {
@@ -741,10 +763,20 @@ fn forge_layer_sources(paths: &WorkspacePaths) -> Result<ForgeLayerSources> {
     })
 }
 
+/// Variants the layer never names as a whole word: `QuartzAction::SetGravity` inside
+/// `QuartzAction::SetGravityStrength` is not a mention of `SetGravity`.
 fn layer_missing(variants: &[String], haystack: &str, prefix: &str) -> Vec<String> {
+    let names_whole = |needle: &str| {
+        haystack.match_indices(needle).any(|(at, _)| {
+            haystack[at + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !(next.is_alphanumeric() || next == '_'))
+        })
+    };
     variants
         .iter()
-        .filter(|v| !haystack.contains(&format!("{prefix}::{v}")))
+        .filter(|v| !names_whole(&format!("{prefix}::{v}")))
         .cloned()
         .collect()
 }
@@ -1103,14 +1135,30 @@ fn codegen_api_guidance(paths: &WorkspacePaths) -> Value {
 }
 
 fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
-    let project_text = fs::read_to_string(paths.root.join("quartz_forge/src/core/project.rs"))?;
+    let project_text = fs::read_to_string(paths.root.join("quartz_project/src/project.rs"))?;
     let persistence_text = fs::read_to_string(paths.root.join("quartz_forge/src/services/persistence.rs"))?;
     let app_text = fs::read_to_string(paths.root.join("quartz_forge/src/app/mod.rs"))?;
 
     Ok(json!({
         "intent": "Create a quartz_forge-native Quartz project that still round-trips through the editor, not a Rust-only crate that quartz_forge can no longer understand.",
+        "data_files": {
+            "layout": [
+                "project.qforge.json: header (name, id counters, plugins, scene order)",
+                "data/scenes/<scene>/scene.json: scene settings, variables, part order",
+                "data/scenes/<scene>/objects/<id>.json, events/<id>.json, logic/<id>.json: one part per file"
+            ],
+            "rules": [
+                "The data files are the source of truth. Edit one part per file (or use qf_project_entity, which type-checks); the editor, the Forge Player and codegen all read these files.",
+                "A part file dropped into objects/, events/ or logic/ is picked up (after the listed ones); a deleted file removes the part. Run qf_project_data_check after hand edits.",
+                "Play Live in the editor (or `forge_player <project root>`) shows data edits in a running game within about a second, no rebuild. Custom Rust code blocks, object shader effects, backgrounds, lighting, post effects, pools and plugins show only in a built game (Preview).",
+                "An editor with the project open reloads files changed outside it, unless it has unsaved edits.",
+                "qf_project_examples gives a valid JSON shape for every action and condition: copy from it rather than guessing.",
+                "Declare variables a scene changes with ModVar in scene.json `variables`: ModVar changes only a variable that exists.",
+                "When a game idea needs something the engine, editor or tools cannot do, file qf_gap_propose with a proposed implementation and wait: build only gap reports the user has Approved (qf_gap_list)."
+            ]
+        },
         "editor_source_of_truth": {
-            "manifest_file": "project.qforge.json",
+            "manifest_file": "project.qforge.json (header) + data/scenes/** (see data_files)",
             "scenes_live_in_manifest": project_text.contains("pub scenes: Vec<SceneDocument>"),
             "objects_live_in_scene_documents": project_text.contains("pub objects: Vec<QuartzObjectBlueprint>"),
             "logic_live_in_scene_documents": project_text.contains("pub logic_trees: Vec<LogicTree>"),
@@ -1126,7 +1174,7 @@ fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
             "managed_entrypoint_markers_present": persistence_text.contains("quartz_forge-managed: main entrypoint") && persistence_text.contains("quartz_forge-managed: build_app scaffold")
         },
         "roundtrip_rules": [
-            "Update project.qforge.json alongside generated Rust or quartz_forge will not reflect the change in the editor.",
+            "Edit the data files (data_files above), not only generated Rust: generated Rust is rebuilt from them. Rust edited by hand comes back through qf_project_import_semantic; every action, condition, logic-tree branch, spawn and declared variable round-trips exactly.",
             "Scene source_file paths should live under src/scenes and follow *_scene.rs naming to match quartz_project_layout conventions.",
             "Prefer scene source_file and per-surface output_file routing instead of inventing ad-hoc module layouts outside the manifest.",
             "AI codegen should mirror quartz_forge GUI export shape (setup_scene/register_logic/register_events + component routing) for reliable semantic import.",
@@ -1169,7 +1217,7 @@ fn project_roundtrip_contract(paths: &WorkspacePaths) -> Result<Value> {
             "Plugin registration and richer runtime bootstrap logic still need explicit code or future MCP/tooling support."
         ],
         "relevant_files": [
-            "quartz_forge/src/core/project.rs",
+            "quartz_project/src/project.rs",
             "quartz_forge/src/services/persistence.rs",
             "quartz_forge/src/app/mod.rs",
             "ball_swing_game/src/lib.rs"
@@ -1205,7 +1253,7 @@ fn path_forge_background_contract(paths: &WorkspacePaths) -> Value {
             "// with hour / day_seconds set: .map(|p| p.with_render_fps(30.0).with_hour(19.5).with_day_length(600.0)); render_fps 0 leaves out with_render_fps; engine Gpu/Cpu adds .with_engine(quartz_path_forge::Engine::Cpu)",
             "match __background_path_forge { Ok(p) => canvas.add_plugin(p), Err(e) => eprintln!(..) }",
         ],
-        "cargo_toml": "Saving the project adds quartz_path_forge = { path = \"../quartz_path_forge\" } and opt-level 3 for path_forge/image/png in dev builds (the project must sit in synful_quartz/, like ../quartz).",
+        "cargo_toml": "Saving the project adds quartz_path_forge = { path = \"../quartz_path_forge\" } and opt-level 3 for path_forge/image/png in dev builds (a path from the game's own folder to the engine checkout, like quartz; games live anywhere, by default in games/ beside the engine).",
         "actions": {
             "form": "QuartzAction::RunPlugin { name: \"path_forge\", data }",
             "data": {"next": "go on to where the journey leads (a transition, or a fork)", "choose:left": "take the left branch of the fork ahead", "choose:right": "take the right branch",
@@ -1639,7 +1687,6 @@ fn parity_report(paths: &WorkspacePaths, surface: &str) -> Result<Value> {
             "Spawn",
             "PluginCall",
             "SetPosition",
-            "SpawnObject",
             "SetText",
         ];
         let wiring: Vec<_> = new_variants.iter().map(|v| {
@@ -1666,7 +1713,7 @@ fn parity_report(paths: &WorkspacePaths, surface: &str) -> Result<Value> {
 
 fn spawn_audit(paths: &WorkspacePaths) -> Result<Value> {
     let app_text = fs::read_to_string(paths.root.join("quartz_forge/src/app/mod.rs"))?;
-    let project_text = fs::read_to_string(paths.root.join("quartz_forge/src/core/project.rs"))?;
+    let project_text = fs::read_to_string(paths.root.join("quartz_project/src/project.rs"))?;
     let codegen_text = fs::read_to_string(paths.root.join("quartz_forge/src/services/codegen.rs"))?;
     let domain_text = fs::read_to_string(&paths.forge_domain_rs)?;
 
@@ -1763,7 +1810,7 @@ fn find_workspace_paths_from(start: &Path) -> Option<WorkspacePaths> {
         let api = current.join("quartz").join("api.txt");
         let action = current.join("quartz").join("src").join("types").join("action.rs");
         let condition = current.join("quartz").join("src").join("types").join("condition.rs");
-        let forge_domain = current.join("quartz_forge").join("src").join("core").join("quartz_domain.rs");
+        let forge_domain = current.join("quartz_project").join("src").join("quartz_domain.rs");
 
         if api.exists() && action.exists() && condition.exists() && forge_domain.exists() {
             let mcp_dir = current.join(".quartz_forge").join("mcp");
@@ -2017,11 +2064,7 @@ mod tests {
                 .join("src")
                 .join("types")
                 .join("condition.rs"),
-            forge_domain_rs: root
-                .join("quartz_forge")
-                .join("src")
-                .join("core")
-                .join("quartz_domain.rs"),
+            forge_domain_rs: root.join("quartz_project").join("src").join("quartz_domain.rs"),
             root,
             mcp_dir: mcp_dir.clone(),
             lock_file: mcp_dir.join("server.lock"),

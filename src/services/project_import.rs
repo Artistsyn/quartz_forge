@@ -18,6 +18,7 @@ use crate::core::quartz_domain::{
     QuartzCondition, QuartzEventBinding, QuartzEventKind, QuartzExpr, QuartzExprKind,
     QuartzKeyModifiers, QuartzLocationRef, QuartzObjectCollisionMode,
     QuartzMouseButtonFilter, QuartzObjectBlueprint, QuartzScrollAxisFilter, QuartzTargetRef,
+    SceneVariable,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -414,6 +415,15 @@ fn parse_object_followup_expr(
             }
             return Ok(());
         }
+        if method == "set_project_effect" {
+            if let Some(var_name) = expr_ident_name(&call.receiver)
+                && let Some(object) = built.get_mut(&var_name)
+            {
+                let args: Vec<&Expr> = call.args.iter().collect();
+                object.effect = crate::core::shader_asset::ProjectEffectChoice::from_call_args(&args, object.w, object.h);
+            }
+            return Ok(());
+        }
         if method == "set_glow_bloom" {
             if let Some(var_name) = expr_ident_name(&call.receiver)
                 && let Some(object) = built.get_mut(&var_name)
@@ -515,10 +525,72 @@ fn closure_is_logic_tree_shape(closure: &ExprClosure) -> bool {
     };
 
     !block.block.stmts.is_empty()
-        && block.block.stmts.iter().all(stmt_is_canvas_run_action)
+        && block.block.stmts.iter().all(stmt_is_tree_statement)
+}
+
+/// A statement codegen writes for a logic tree: a run, a spawn template, or a branch
+/// (`if canvas.check(&cond) { .. } else { .. }`) whose arms hold the same.
+fn stmt_is_tree_statement(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(Expr::If(branch), _) => branch_condition(branch).is_some()
+            && branch.then_branch.stmts.iter().all(stmt_is_tree_statement)
+            && branch.else_branch.as_ref().is_none_or(|(_, other)| {
+                matches!(&**other, Expr::Block(block) if block.block.stmts.iter().all(stmt_is_tree_statement))
+            }),
+        _ => stmt_is_canvas_run_action(stmt),
+    }
+}
+
+/// The condition inside `if canvas.check(&cond)`.
+fn branch_condition(branch: &syn::ExprIf) -> Option<&Expr> {
+    let Expr::MethodCall(call) = &*branch.cond else { return None };
+    if call.method != "check" || call.args.len() != 1 {
+        return None;
+    }
+    match call.args.first()? {
+        Expr::Reference(reference) => Some(&reference.expr),
+        other => Some(other),
+    }
+}
+
+fn parse_tree_statements(stmts: &[Stmt]) -> Vec<LogicNode> {
+    let mut nodes = Vec::new();
+    for stmt in stmts {
+        if let Stmt::Expr(Expr::If(branch), _) = stmt {
+            if let Some(condition) = branch_condition(branch) {
+                let else_nodes = match branch.else_branch.as_ref().map(|(_, other)| &**other) {
+                    Some(Expr::Block(block)) => parse_tree_statements(&block.block.stmts),
+                    _ => Vec::new(),
+                };
+                nodes.push(LogicNode::Branch {
+                    condition: parse_condition_expr(condition),
+                    then_nodes: parse_tree_statements(&branch.then_branch.stmts),
+                    else_nodes,
+                });
+                continue;
+            }
+        }
+        if let Some(action) = parse_action_from_stmt(stmt) {
+            nodes.push(LogicNode::Action(action));
+        }
+    }
+    // `canvas.run(Action::Multi(vec![]))` alone is how an empty tree (or arm) is written.
+    if let [LogicNode::Action(QuartzAction::Multi { actions })] = nodes.as_slice() {
+        if actions.is_empty() {
+            nodes.clear();
+        }
+    }
+    nodes
 }
 
 fn stmt_is_canvas_run_action(stmt: &Stmt) -> bool {
+    // `let spawn_<id>_template = spawn_<id>(canvas);` builds a template the run
+    // that follows clones; it belongs to the tree, not to custom code.
+    if let Stmt::Local(local) = stmt {
+        let Pat::Ident(PatIdent { ident, .. }) = &local.pat else { return false };
+        let name = ident.to_string();
+        return name.starts_with("spawn_") && name.ends_with("_template");
+    }
     let Stmt::Expr(Expr::MethodCall(call), _) = stmt else {
         return false;
     };
@@ -528,10 +600,9 @@ fn stmt_is_canvas_run_action(stmt: &Stmt) -> bool {
 fn parse_logic_nodes_from_closure(closure: &ExprClosure) -> Vec<LogicNode> {
     let mut nodes = Vec::new();
     if let Expr::Block(block) = &*closure.body {
-        for stmt in &block.block.stmts {
-            if let Some(action) = parse_action_from_stmt(stmt) {
-                nodes.push(LogicNode::Action(action));
-            }
+        nodes = parse_tree_statements(&block.block.stmts);
+        if nodes.is_empty() {
+            return nodes;
         }
     } else {
         nodes.push(LogicNode::Action(QuartzAction::Expr {
@@ -702,6 +773,13 @@ fn import_custom_blocks_from_ast(
             if let Some(post_fx) = extract_post_fx_spec(func) {
                 if let Some(scene) = state.manifest.scenes.get_mut(scene_index) {
                     scene.post_fx = post_fx;
+                    updated += 1;
+                }
+            }
+            let declared: Vec<_> = func.block.stmts.iter().filter_map(SceneVariable::parse_set_var).collect();
+            if let Some(scene) = state.manifest.scenes.get_mut(scene_index) {
+                if scene.variables != declared {
+                    scene.variables = declared;
                     updated += 1;
                 }
             }
@@ -978,6 +1056,9 @@ fn extract_setup_scene_game_vars(func: &ItemFn) -> Option<String> {
         .iter()
         .filter_map(|stmt| {
             let Stmt::Expr(Expr::MethodCall(call), _) = stmt else { return None; };
+            if SceneVariable::parse_set_var(stmt).is_some() {
+                return None;
+            }
             if call.method == "set_var" || call.method == "mod_var" {
                 Some(stmt.to_token_stream().to_string())
             } else {
@@ -2368,7 +2449,14 @@ fn parse_action_expr(expr: &Expr) -> QuartzAction {
                         }
                     }
                     "mode" => {
-                        mode = path_last_ident(&field.expr)
+                        // `CollisionMode::Surface` is a path; `CollisionMode::solid()`
+                        // and its kin are calls, named by the function.
+                        let called = match &field.expr {
+                            Expr::Call(call) => path_last_ident(&call.func),
+                            _ => None,
+                        };
+                        mode = called
+                            .or_else(|| path_last_ident(&field.expr))
                             .or_else(|| extract_to_owned_string(&field.expr))
                             .unwrap_or_else(|| "Solid".to_owned());
                     }
@@ -2454,6 +2542,31 @@ fn parse_action_expr(expr: &Expr) -> QuartzAction {
                 }
             }
             QuartzAction::SpawnEmitter { name }
+        }
+        Some("PlayParticles") => {
+            let (mut effect, mut name, mut target, mut offset) = (String::new(), String::new(), None, [0.0f32, 0.0]);
+            for field in fields {
+                let Member::Named(member) = &field.member else { continue; };
+                match member.to_string().as_str() {
+                    "name" => name = extract_to_owned_string(&field.expr).unwrap_or_default(),
+                    "emitter" => effect = crate::services::codegen_particles::ParticleCodegen::effect_named_by(&field.expr).unwrap_or_default(),
+                    "target" => target = parse_optional_target_ref(&field.expr),
+                    "offset" => offset = expr_to_f32_pair(&field.expr).map_or([0.0, 0.0], |(x, y)| [x, y]),
+                    _ => {}
+                }
+            }
+            if name == effect {
+                name.clear();
+            }
+            QuartzAction::PlayParticles { effect, name, target, offset }
+        }
+        Some("StopParticles") => {
+            let name = fields.iter().find(|field| matches!(&field.member, Member::Named(member) if member == "name")).and_then(|field| extract_to_owned_string(&field.expr)).unwrap_or_default();
+            QuartzAction::StopParticles { name }
+        }
+        Some("RemoveParticles") => {
+            let name = fields.iter().find(|field| matches!(&field.member, Member::Named(member) if member == "name")).and_then(|field| extract_to_owned_string(&field.expr)).unwrap_or_default();
+            QuartzAction::RemoveParticles { name }
         }
         Some("RemoveEmitter") => {
             let mut name = String::new();
@@ -2900,7 +3013,7 @@ fn parse_action_expr(expr: &Expr) -> QuartzAction {
                     _ => {}
                 }
             }
-            QuartzAction::SpawnObject { template_id, location }
+            QuartzAction::Spawn { template_id, location }
         }
         Some("SetGravityStrength") => {
             let mut target = QuartzTargetRef::Name("player".to_owned());
@@ -3144,6 +3257,22 @@ fn parse_action_expr(expr: &Expr) -> QuartzAction {
         Some("SetZoom") => QuartzAction::SetZoom {
             value: field_f32(fields, &["value", "zoom"], 1.0),
         },
+        Some("SmoothZoom") => QuartzAction::SmoothZoom {
+            value: field_f32(fields, &["value", "zoom"], 1.0),
+        },
+        Some("SetGravity") => QuartzAction::SetGravity {
+            target: field_target(fields),
+            value: field_f32(fields, &["value"], 1.0),
+        },
+        Some("Remove") => QuartzAction::Remove { target: field_target(fields) },
+        Some("CameraFlash") => {
+            // Codegen writes the intensity as the white flash's alpha byte.
+            let alpha = struct_field(fields, &["color"]).and_then(expr_to_rgba_u8).map_or(255, |rgba| rgba[3]);
+            QuartzAction::CameraFlash {
+                duration_s: field_f32(fields, &["duration", "duration_s"], 0.2),
+                intensity: unit_from_byte(alpha),
+            }
+        }
         Some("CameraShake") => QuartzAction::CameraShake {
             intensity: field_f32(fields, &["intensity"], 1.0),
             duration_s: field_f32(fields, &["duration", "duration_s"], 0.5),
@@ -3169,6 +3298,9 @@ fn parse_action_expr(expr: &Expr) -> QuartzAction {
 }
 
 fn parse_condition_expr(expr: &Expr) -> QuartzCondition {
+    if let Some(variable_test) = parse_var_compare_method(expr) {
+        return variable_test;
+    }
     if let Expr::Path(path) = expr {
         return match path.path.segments.last().map(|seg| seg.ident.to_string()).as_deref() {
             Some("Always") => QuartzCondition::Always,
@@ -3352,6 +3484,14 @@ fn parse_condition_expr(expr: &Expr) -> QuartzCondition {
             let right = parse_expr_value(&args[2]);
             QuartzCondition::Compare { left, op, right }
         }
+        "CollisionWith" if args.len() >= 2 => match (parse_target_ref(&args[0]), parse_target_ref(&args[1])) {
+            (Some(QuartzTargetRef::Name(object_a)), Some(QuartzTargetRef::Name(object_b))) => {
+                QuartzCondition::CollisionWith { object_a, object_b }
+            }
+            _ => QuartzCondition::Expr {
+                raw: normalize_token_string(&expr.to_token_stream().to_string()),
+            },
+        },
         "IsRotating" if !args.is_empty() => parse_target_ref(&args[0])
             .map(|target| QuartzCondition::IsRotating { target })
             .unwrap_or_else(|| QuartzCondition::Expr {
@@ -3431,14 +3571,54 @@ fn parse_boxed_condition_expr(expr: &Expr) -> Option<QuartzCondition> {
     Some(parse_condition_expr(inner))
 }
 
+/// `Expr::var("score").gte(quartz::Value::F32(3.0))`: codegen's form of `VarCompare`.
+fn parse_var_compare_method(expr: &Expr) -> Option<QuartzCondition> {
+    use crate::core::quartz_domain::CompareOp;
+    let Expr::MethodCall(call) = expr else { return None };
+    let op = match call.method.to_string().as_str() {
+        "eq" => CompareOp::Eq,
+        "ne" => CompareOp::Ne,
+        "lt" => CompareOp::Lt,
+        "lte" => CompareOp::Le,
+        "gt" => CompareOp::Gt,
+        "gte" => CompareOp::Ge,
+        _ => return None,
+    };
+    let Expr::Call(receiver) = &*call.receiver else { return None };
+    if path_last_ident(&receiver.func).as_deref() != Some("var") {
+        return None;
+    }
+    let variable = receiver.args.first().and_then(extract_to_owned_string)?;
+    let Expr::Call(value_call) = call.args.first()? else { return None };
+    if path_last_ident(&value_call.func).as_deref() != Some("F32") {
+        return None;
+    }
+    let value = expr_to_f32(value_call.args.first()?).ok()?;
+    Some(QuartzCondition::VarCompare { variable, op, value })
+}
+
+/// The shortest decimal that a byte of `unit * 255` came from: 128 reads back as 0.5, not
+/// 0.502, so an intensity typed with up to two decimals survives the byte exactly.
+fn unit_from_byte(byte: u8) -> f32 {
+    let exact = f32::from(byte) / 255.0;
+    (0..=4)
+        .map(|digits| {
+            let scale = 10f32.powi(digits);
+            (exact * scale).round() / scale
+        })
+        .find(|candidate| (candidate * 255.0).round() == f32::from(byte))
+        .unwrap_or(exact)
+}
+
 fn parse_compare_op_expr(expr: &Expr) -> crate::core::quartz_domain::CompareOp {
     match path_last_ident(expr).as_deref() {
         Some("Eq") => crate::core::quartz_domain::CompareOp::Eq,
         Some("Ne") => crate::core::quartz_domain::CompareOp::Ne,
         Some("Lt") => crate::core::quartz_domain::CompareOp::Lt,
-        Some("Le") => crate::core::quartz_domain::CompareOp::Le,
+        // The engine spells them `Lte` / `Gte` (what codegen writes); `Le` / `Ge` are the editor's.
+        Some("Le" | "Lte") => crate::core::quartz_domain::CompareOp::Le,
         Some("Gt") => crate::core::quartz_domain::CompareOp::Gt,
-        Some("Ge") => crate::core::quartz_domain::CompareOp::Ge,
+        Some("Ge" | "Gte") => crate::core::quartz_domain::CompareOp::Ge,
         _ => crate::core::quartz_domain::CompareOp::Eq,
     }
 }
@@ -3804,7 +3984,7 @@ fn parse_set_animation_fields(
 
 /// Structured import of `Action::SetText { target, text }` where `text` is the
 /// codegen-emitted `{ let font = ...; Text::new(vec![Span::new("content", SIZEf32,
-/// Some(..), font, Color::from_rgb(r, g, b), 0.0)], ...) }` block. Hand-written
+/// Some(..), font, Color(r, g, b, 255), 0.0)], ...) }` block. Hand-written
 /// exotic Text expressions fall back to a raw blob (None).
 fn parse_set_text_fields(
     fields: &syn::punctuated::Punctuated<syn::FieldValue, syn::token::Comma>,
@@ -3827,8 +4007,8 @@ fn parse_set_text_fields(
         .next()
         .unwrap_or(16.0);
 
-    // Color: from_rgb(r, g, b)
-    let color_rgb = seg.find("from_rgb").and_then(|i| {
+    // Color: `Color(r, g, b, a)`, or `from_rgb(r, g, b)` in older generated code.
+    let color_rgb = seg.find("from_rgb").or_else(|| seg.find("Color (")).and_then(|i| {
         let inner = &seg[i..];
         let open = inner.find('(')?;
         let close = inner.find(')')?;
@@ -3836,7 +4016,7 @@ fn parse_set_text_fields(
             .split(',')
             .filter_map(|n| n.trim().parse::<u8>().ok())
             .collect();
-        if nums.len() == 3 { Some([nums[0], nums[1], nums[2]]) } else { None }
+        if nums.len() >= 3 { Some([nums[0], nums[1], nums[2]]) } else { None }
     }).unwrap_or([255, 255, 255]);
 
     // Font asset: last path-like string literal in the font binding, if any.
@@ -3883,6 +4063,12 @@ fn first_string_literal(tokens: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `None` or `Some(<target>)`.
+fn parse_optional_target_ref(expr: &Expr) -> Option<QuartzTargetRef> {
+    let Expr::Call(call) = expr else { return None };
+    call.args.first().and_then(parse_target_ref)
 }
 
 fn parse_target_ref(expr: &Expr) -> Option<QuartzTargetRef> {
@@ -3972,8 +4158,8 @@ fn parse_mouse_button_filter(expr: &Expr) -> QuartzMouseButtonFilter {
 
 fn parse_scroll_axis_filter(expr: &Expr) -> QuartzScrollAxisFilter {
     match path_last_ident(expr).as_deref() {
-        Some("X") => QuartzScrollAxisFilter::X,
-        Some("Y") => QuartzScrollAxisFilter::Y,
+        Some("X" | "Horizontal" | "Left" | "Right") => QuartzScrollAxisFilter::X,
+        Some("Y" | "Vertical" | "Up" | "Down") => QuartzScrollAxisFilter::Y,
         _ => QuartzScrollAxisFilter::Any,
     }
 }
@@ -4169,7 +4355,10 @@ fn expr_to_rgb_u8(expr: &Expr) -> Option<[u8; 3]> {
             expr_to_f32(&tuple.elems[1]).ok()? as u8,
             expr_to_f32(&tuple.elems[2]).ok()? as u8,
         ]),
-        Expr::Call(ExprCall { func, args, .. }) if path_last_ident(func).as_deref() == Some("from_rgb") && args.len() >= 3 => {
+        // `Color::from_rgb(r, g, b)` (older generated code) or `Color(r, g, b, a)`.
+        Expr::Call(ExprCall { func, args, .. })
+            if matches!(path_last_ident(func).as_deref(), Some("from_rgb" | "Color")) && args.len() >= 3 =>
+        {
             Some([
                 expr_to_f32(&args[0]).ok()? as u8,
                 expr_to_f32(&args[1]).ok()? as u8,
@@ -4249,7 +4438,12 @@ fn parse_spawn_template_id_expr(expr: &Expr) -> Option<String> {
             ident.strip_prefix("spawn_").map(|value| value.to_owned())
         }
         Expr::Paren(paren) => parse_spawn_template_id_expr(&paren.expr),
-        Expr::Path(_) => path_last_ident(expr).and_then(|ident| ident.strip_prefix("spawn_").map(|value| value.to_owned())),
+        // `spawn_<id>_template.clone()`: the template built before the statement.
+        Expr::MethodCall(call) if call.method == "clone" => parse_spawn_template_id_expr(&call.receiver),
+        Expr::Path(_) => path_last_ident(expr).and_then(|ident| {
+            let id = ident.strip_prefix("spawn_")?;
+            Some(id.strip_suffix("_template").unwrap_or(id).to_owned())
+        }),
         _ => None,
     }
 }
@@ -5869,10 +6063,14 @@ pub fn register_events(canvas: &mut Canvas) {
             .custom_code_blocks
             .iter()
             .any(|b| b.kind == CustomCodeKind::Constants && b.code.contains("PLAYER_SPEED")));
-        assert!(state.manifest.scenes[0]
+        // `canvas.set_var("score", Value::I32(0))` is the declared-variable form: it imports
+        // as a scene variable, not as custom code.
+        assert_eq!(state.manifest.scenes[0].variables.len(), 1);
+        assert_eq!(state.manifest.scenes[0].variables[0].name, "score");
+        assert!(!state.manifest.scenes[0]
             .custom_code_blocks
             .iter()
-            .any(|b| b.kind == CustomCodeKind::GameStateVars && b.code.contains("set_var")));
+            .any(|b| b.kind == CustomCodeKind::GameStateVars && b.code.contains("\"score\"")));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6228,7 +6426,7 @@ pub fn register_logic(canvas: &mut Canvas) {
         canvas.run(Action::SetPhysicsQuality { quality: PhysicsQuality::High });
     });
     canvas.on_update(|canvas| {
-        canvas.run(Action::SetCollisionMode { target: Target::name("player"), mode: CollisionMode::Sensor });
+        canvas.run(Action::SetCollisionMode { target: Target::name("player"), mode: CollisionMode::non_platform() });
     });
     canvas.on_update(|canvas| {
         canvas.run(Action::SetSlope { target: Target::name("player"), left_offset: -2.0, right_offset: 2.0, auto_rotate: true });

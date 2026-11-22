@@ -125,6 +125,7 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     let Some(scene) = state.manifest.scenes.get(scene_index) else {
         return "// no active scene".to_owned();
     };
+    let _effects = crate::services::codegen_particles::ParticleCodegen::lend(&state.manifest.particle_effects);
 
     let scene_source_file = scene.source_file.trim();
     let mut external_modules: BTreeMap<String, String> = BTreeMap::new();
@@ -221,6 +222,10 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     }
 
     // Phase 2: game-state vars and setup_runtime (locals are still alive here).
+    // Declared scene variables first, so custom var blocks can read or overwrite them.
+    for variable in &scene.variables {
+        out.push_str(&format!("    {}\n", variable.set_var_stmt()));
+    }
     for block in &scene.custom_code_blocks {
         if !matches!(block.kind, CustomCodeKind::GameStateVars | CustomCodeKind::TypedVars)
             || block.code.trim().is_empty()
@@ -243,6 +248,9 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
     for object in &inline_objects {
         out.push_str(&codegen::object_add_line(object));
     }
+    for object in &inline_objects {
+        out.push_str(&crate::services::codegen_particles::ParticleCodegen::object_lines(object));
+    }
 
     // Phase 4: pools, camera, background — after objects/templates exist.
     out.push_str(&codegen::scene_pool_lines(scene));
@@ -261,7 +269,7 @@ pub fn build_scene_source(state: &EditorProjectState, scene_index: usize) -> Str
         if target == scene_source_file {
             out.push_str(&format!("    // Update Script: {}\n", tree.name));
             out.push_str("    canvas.on_update(|canvas| {\n");
-            out.push_str(&format!("        canvas.run({});\n", codegen::logic_tree_action_expr(tree)));
+            out.push_str(&codegen::TreeStatements::emit(&tree.nodes, "        "));
             out.push_str("    });\n");
         } else {
             out.push_str(&format!("    {}(canvas);\n", codegen::logic_tree_function_name(tree)));
@@ -338,6 +346,7 @@ pub fn build_component_module_source(
     target_file: &str,
 ) -> Option<String> {
     let scene = state.manifest.scenes.get(scene_index)?;
+    let _effects = crate::services::codegen_particles::ParticleCodegen::lend(&state.manifest.particle_effects);
     let scene_source_file = scene.source_file.trim();
     let mut out = String::new();
     let mut wrote_any = false;
@@ -583,6 +592,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every action and condition the editor can author, an event that spawns, and declared
+    /// variables: generated, imported back, and compared field for field. A difference means
+    /// an edit made in code (by hand or by an agent) would not come back intact.
+    #[test]
+    fn every_action_and_condition_survives_codegen_and_import() {
+        use crate::core::quartz_domain::{
+            LogicNode, LogicTree, QuartzAction, QuartzEventBinding, QuartzEventKind, QuartzTargetRef,
+            SceneVariable,
+        };
+        let root = temp_root("every_variant_roundtrip");
+        let mut state = EditorProjectState::new("sync_test".to_owned());
+        let scene_file = "src/scripts/main_scene.rs";
+        state.manifest.scenes[0].source_file = scene_file.to_owned();
+        let samples = crate::core::samples::Samples {
+            target: QuartzTargetRef::Name("player".to_owned()),
+            other: QuartzTargetRef::Name("ground".to_owned()),
+            template_id: "bullet".to_owned(),
+            animation_asset: "assets/run.gif".to_owned(),
+        };
+        let mut nodes: Vec<LogicNode> = samples.actions().into_iter().map(LogicNode::Action).collect();
+        nodes.extend(samples.conditions().into_iter().map(|condition| LogicNode::Branch {
+            condition,
+            then_nodes: vec![LogicNode::Action(QuartzAction::Show { target: samples.target.clone() })],
+            else_nodes: Vec::new(),
+        }));
+        let scene = &mut state.manifest.scenes[0];
+        for id in ["player", "ground"] {
+            scene.objects.push(QuartzObjectBlueprint::new(id.to_owned(), id.to_owned()));
+        }
+        let mut bullet = QuartzObjectBlueprint::new("bullet".to_owned(), "bullet".to_owned());
+        bullet.spawn_only = true;
+        scene.objects.push(bullet);
+        let mut tree = LogicTree::new("logic_every".to_owned(), "every".to_owned());
+        tree.output_file = scene_file.to_owned();
+        tree.nodes = nodes.clone();
+        scene.logic_trees.push(tree);
+        let mut fire = QuartzEventBinding::new("evt_fire".to_owned(), "fire".to_owned(), samples.target.clone());
+        fire.output_file = scene_file.to_owned();
+        fire.kind = QuartzEventKind::KeyPress { key: "f".to_owned(), modifiers: Default::default() };
+        fire.action = Some(samples.actions().into_iter().find(|a| matches!(a, QuartzAction::Spawn { .. })).unwrap());
+        scene.events.push(fire.clone());
+        scene.variables = vec![SceneVariable {
+            name: "lives".to_owned(),
+            value: QuartzExpr { kind: QuartzExprKind::I32, raw: "3".to_owned() },
+        }];
+        let variables = scene.variables.clone();
+
+        write_all_generated_files_from_state(&state, &root).unwrap();
+        let mut files = Vec::new();
+        collect_rs_files(&root, &root.join("src"), &mut files);
+        let mut imported = EditorProjectState::new("sync_test".to_owned());
+        imported.manifest.scenes[0].source_file = scene_file.to_owned();
+        project_import::import_files_into_state(&mut imported, &root, &files, true).unwrap();
+
+        let back = &imported.manifest.scenes[0];
+        assert_eq!(back.logic_trees.len(), 1, "custom code: {:?}", back.custom_code_blocks);
+        let want = serde_json::to_value(&nodes).unwrap();
+        let got = serde_json::to_value(&back.logic_trees[0].nodes).unwrap();
+        for (index, (wanted, gotten)) in want.as_array().unwrap().iter().zip(got.as_array().unwrap()).enumerate() {
+            assert_eq!(wanted, gotten, "node {index} changed on the round trip");
+        }
+        assert_eq!(want.as_array().unwrap().len(), got.as_array().unwrap().len());
+        assert_eq!(back.events.len(), 1);
+        assert_eq!(serde_json::to_value(&back.events[0].action).unwrap(), serde_json::to_value(&fire.action).unwrap());
+        assert_eq!(back.variables, variables);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

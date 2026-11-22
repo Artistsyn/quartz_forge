@@ -129,7 +129,7 @@ pub fn code_layouter(ui: &egui::Ui, text: &str, wrap_width: f32) -> Arc<egui::te
         job
     };
 
-    ui.fonts(|f| f.layout_job(job))
+    ui.fonts_mut(|f| f.layout_job(job))
 }
 
 fn append_colored(job: &mut egui::text::LayoutJob, text: &str, font: &egui::FontId, color: egui::Color32) {
